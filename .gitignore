@@ -4,3 +4,5 @@ data/test
 data/train
 # Exclude large pickle files
 data/*.p
+
+config.json
