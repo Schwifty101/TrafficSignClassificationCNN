@@ -5,6 +5,5 @@ data/train
 # Exclude large pickle files
 data/*.p
 
-evaluator.py
 main.py
 trainer.py
