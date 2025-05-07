@@ -149,5 +149,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Acknowledgments
 
 - German Traffic Sign Recognition Benchmark (GTSRB) dataset
+- [Kaggle GTSRB Dataset](https://www.kaggle.com/datasets/meowmeowmeowmeowmeow/gtsrb-german-traffic-sign)
 - TensorFlow and scikit-learn libraries
 - Data augmentation techniques inspired by various research papers in computer vision
