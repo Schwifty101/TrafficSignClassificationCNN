@@ -2,6 +2,8 @@
 __pycache__/
 data/test
 data/train
+# Exclude large pickle files
+data/*.p
 
 data_processor.py
 evaluator.py
