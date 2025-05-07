@@ -6,4 +6,3 @@ data/train
 data/*.p
 
 main.py
-trainer.py
