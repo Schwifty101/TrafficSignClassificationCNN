@@ -5,7 +5,6 @@ data/train
 # Exclude large pickle files
 data/*.p
 
-data_processor.py
 evaluator.py
 main.py
 model_builder.py
