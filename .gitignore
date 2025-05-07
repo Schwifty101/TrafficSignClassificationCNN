@@ -1,0 +1,11 @@
+.venv
+__pycache__/
+data/test
+data/train
+
+data_processor.py
+evaluator.py
+main.py
+model_builder.py
+predictor.py
+trainer.py

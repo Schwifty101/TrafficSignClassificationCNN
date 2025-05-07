@@ -1,0 +1,11 @@
+{
+  "logger_config": {
+    "email_config": {
+      "smtp_server": "smtp.gmail.com",
+      "smtp_port": 465,
+      "sender_email": "sobanahmad2003@gmail.com",
+      "receiver_email": "sobanahmad2003@gmail.com",
+      "password": "kunw kjli ejni yfbc"
+    }
+  }
+}
