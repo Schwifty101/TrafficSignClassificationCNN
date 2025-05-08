@@ -4,3 +4,4 @@ tensorflow
 pandas 
 scikit-learn 
 scikit-image
+seaborn

@@ -120,7 +120,18 @@ def extend_balancing_classes(X, y, aug_intensity=0.5, counts=None):
     y_extended = np.empty([0], dtype = y_indices.dtype)
     
     print(f"Extending dataset using augmented data (intensity = {aug_intensity}):")
+    
+    # Progress tracking
+    progress_total = num_classes
+    progress_current = 0
+    
     for c, c_count in zip(range(num_classes), class_counts):
+        # Progress display
+        progress_current += 1
+        progress_percentage = progress_current / progress_total * 100
+        progress_bar = '█' * int(progress_percentage / 2) + '-' * (50 - int(progress_percentage / 2))
+        print(f"\r[{progress_bar}] {progress_percentage:.1f}% - Processing class {c}/{num_classes-1} ", end='', flush=True)
+        
         # How many examples should there be eventually for this class:
         max_c = max_c if counts is None else counts[c]
         # First copy existing data for this class
@@ -142,6 +153,9 @@ def extend_balancing_classes(X, y, aug_intensity=0.5, counts=None):
         # Fill labels for added images set to current class.
         added = X_extended.shape[0] - y_extended.shape[0]
         y_extended = np.append(y_extended, np.full((added), c, dtype = int))
+    
+    # Print a newline to finish the progress display
+    print()
     
     # Convert back to one-hot encoding if input was one-hot encoded
     if len(y.shape) > 1 and y.shape[1] > 1:

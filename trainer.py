@@ -3,7 +3,7 @@ import tensorflow as tf
 import numpy as np
 import time
 import matplotlib.pyplot as plt
-from model_builder import Parameters, model_pass, get_time_hhmmss, print_progress
+from model_builder import Parameters, model_pass, get_time_hhmmss, print_progress, TrafficSignModel
 from data_loader import load_pickled_data
 import json
 import os
@@ -12,26 +12,24 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
 
+# Use TF2.x compatibility
+print("Using TensorFlow version:", tf.__version__)
+
 class EarlyStopping:
-    def __init__(self, saver, session, patience=100, minimize=True):
+    def __init__(self, checkpoint, patience=100, minimize=True):
         self.minimize = minimize
         self.patience = patience
-        self.saver = saver
-        self.session = session
+        self.checkpoint = checkpoint
         self.best_monitored_value = np.inf if minimize else 0.
         self.best_monitored_epoch = 0
-        self.restore_path = None
 
     def __call__(self, value, epoch):
         if (self.minimize and value < self.best_monitored_value) or (not self.minimize and value > self.best_monitored_value):
             self.best_monitored_value = value
             self.best_monitored_epoch = epoch
-            self.restore_path = self.saver.save(self.session, os.getcwd() + "/early_stopping_checkpoint")
+            self.checkpoint.save()
         elif self.best_monitored_epoch + self.patience < epoch:
-            if self.restore_path != None:
-                self.saver.restore(self.session, self.restore_path)
-            else:
-                print("ERROR: Failed to restore session")
+            self.checkpoint.restore()
             return True
         return False
 
@@ -127,6 +125,18 @@ class ModelCloudLog:
             self.send_email_notification(f"Training update: {caption}", learning_curves_path)
 
 def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logger_config):
+    # Convert input data to float32 if needed
+    if X_train.dtype != np.float32:
+        print(f"Converting input data from {X_train.dtype} to float32")
+        X_train = X_train.astype(np.float32)
+        X_valid = X_valid.astype(np.float32)
+        X_test = X_test.astype(np.float32)
+    
+    # Normalize the data to [0, 1] range
+    X_train /= 255.0
+    X_valid /= 255.0
+    X_test /= 255.0
+    
     paths = Paths(params)
     log = ModelCloudLog(
         os.path.join(paths.root_path, "logs"),
@@ -136,143 +146,229 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
     
     log.log_parameters(params, y_train.shape[0], y_valid.shape[0], y_test.shape[0])
     
-    # Build the graph
-    graph = tf.Graph()
-    with graph.as_default():
-        tf_x_batch = tf.placeholder(tf.float32, shape=(None, params.image_size[0], params.image_size[1], 1))
-        tf_y_batch = tf.placeholder(tf.float32, shape=(None, params.num_classes))
-        is_training = tf.placeholder(tf.bool)
-        current_epoch = tf.Variable(0, trainable=False)
-        
-        if params.learning_rate_decay:
-            learning_rate = tf.train.exponential_decay(params.learning_rate, current_epoch, decay_steps=params.max_epochs, decay_rate=0.01)
-        else:
-            learning_rate = params.learning_rate
+    # Create model directly from model_builder
+    model = TrafficSignModel(params)
+    
+    # Learning rate schedule if enabled
+    if params.learning_rate_decay:
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=params.learning_rate,
+            decay_steps=params.max_epochs,
+            decay_rate=0.01
+        )
+        learning_rate = lr_schedule
+    else:
+        learning_rate = params.learning_rate
+    
+    # Create optimizer
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    
+    # Compile the model for better performance
+    model.compile(
+        optimizer=optimizer,
+        loss=tf.keras.losses.CategoricalCrossentropy(from_logits=True),
+        metrics=['accuracy']
+    )
+    
+    # Create a sample input to build the model
+    sample_input = X_train[:1]
+    _ = model(sample_input, training=False)
+    model.summary()
+    
+    # Checkpoints for saving model
+    checkpoint_dir = os.path.dirname(paths.model_path)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
+    checkpoint_manager = tf.train.CheckpointManager(
+        checkpoint, directory=checkpoint_dir, max_to_keep=3
+    )
+    
+    class CustomCheckpoint:
+        def __init__(self, checkpoint_manager):
+            self.manager = checkpoint_manager
             
-        with tf.variable_scope(params.var_scope):
-            logits = model_pass(tf_x_batch, params, is_training)
+        def save(self):
+            self.manager.save()
             
-        predictions = tf.nn.softmax(logits)
-        
-        if params.l2_reg_enabled:
-            with tf.variable_scope('fc4', reuse=True):
-                l2_loss = tf.nn.l2_loss(tf.get_variable('weights'))
-        else:
-            l2_loss = 0
-            
-        softmax_cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=tf_y_batch)
-        loss = tf.reduce_mean(softmax_cross_entropy) + params.l2_lambda * l2_loss
-        
-        optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
-        
-        with tf.Session(graph=graph) as session:
-            session.run(tf.global_variables_initializer())
-            
-            def get_accuracy_and_loss_in_batches(X, y):
-                p = []
-                sce = []
-                batch_size = 128
-                for i in range(0, len(X), batch_size):
-                    x_batch = X[i:i+batch_size]
-                    y_batch = y[i:i+batch_size]
-                    [p_batch, sce_batch] = session.run([predictions, softmax_cross_entropy], feed_dict={tf_x_batch: x_batch, tf_y_batch: y_batch, is_training: False})
-                    p.extend(p_batch)
-                    sce.extend(sce_batch)
-                p = np.array(p)
-                sce = np.array(sce)
-                accuracy = 100.0 * np.sum(np.argmax(p, 1) == np.argmax(y, 1)) / p.shape[0]
-                loss = np.mean(sce)
-                return (accuracy, loss)
-            
-            if params.resume_training:
-                try:
-                    tf.train.Saver().restore(session, paths.model_path)
-                except Exception as e:
-                    log(f"Failed restoring previously trained model: {e}")
-                    pass
-            
-            saver = tf.train.Saver()
-            early_stopping = EarlyStopping(tf.train.Saver(), session, patience=params.early_stopping_patience, minimize=True)
-            
-            train_loss_history = np.empty([0], dtype=np.float32)
-            train_accuracy_history = np.empty([0], dtype=np.float32)
-            valid_loss_history = np.empty([0], dtype=np.float32)
-            valid_accuracy_history = np.empty([0], dtype=np.float32)
-            
-            if params.max_epochs > 0:
-                log("================= TRAINING ==================")
+        def restore(self):
+            if self.manager.latest_checkpoint:
+                checkpoint.restore(self.manager.latest_checkpoint)
+                return True
+            return False
+    
+    # Create checkpoint wrapper for early stopping
+    custom_checkpoint = CustomCheckpoint(checkpoint_manager)
+    
+    # Try to restore previous model if requested
+    if params.resume_training:
+        try:
+            if custom_checkpoint.restore():
+                log("Restored previously trained model.")
             else:
-                log("================== TESTING ==================")
+                log("No checkpoint found, starting from scratch.")
+        except Exception as e:
+            log(f"Failed restoring previously trained model: {e}")
+    
+    # Initialize early stopping
+    early_stopping = EarlyStopping(custom_checkpoint, patience=params.early_stopping_patience, minimize=True)
+    
+    # Training history
+    train_loss_history = np.empty([0], dtype=np.float32)
+    train_accuracy_history = np.empty([0], dtype=np.float32)
+    valid_loss_history = np.empty([0], dtype=np.float32)
+    valid_accuracy_history = np.empty([0], dtype=np.float32)
+    
+    # Define the training step
+    @tf.function
+    def train_step(x, y):
+        with tf.GradientTape() as tape:
+            logits = model(x, training=True)
+            loss_value = tf.keras.losses.categorical_crossentropy(y, logits, from_logits=True)
+            loss_value = tf.reduce_mean(loss_value)
+            
+            # Add L2 regularization if enabled
+            if params.l2_reg_enabled:
+                l2_losses = []
+                for var in model.trainable_variables:
+                    if 'kernel' in var.name or 'weights' in var.name:
+                        l2_losses.append(tf.nn.l2_loss(var))
+                if l2_losses:
+                    l2_loss = tf.add_n(l2_losses)
+                    loss_value += params.l2_lambda * l2_loss
+        
+        gradients = tape.gradient(loss_value, model.trainable_variables)
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        return loss_value
+    
+    # Function to evaluate model
+    def get_accuracy_and_loss_in_batches(X, y):
+        predictions = []
+        losses = []
+        batch_size = 128
+        
+        # Add progress tracking for large datasets
+        num_batches = (len(X) + batch_size - 1) // batch_size
+        if num_batches > 10:  # Only show progress for large datasets
+            print(f"\rEvaluating on {len(X)} samples: ", end="")
+        
+        for i in range(0, len(X), batch_size):
+            if num_batches > 10:
+                progress = (i // batch_size) / num_batches * 100
+                progress_bar = '█' * int(progress / 2) + '-' * (50 - int(progress / 2))
+                print(f"\r[{progress_bar}] {progress:.1f}% - Evaluating on {len(X)} samples ", end="")
+                
+            x_batch = X[i:i+batch_size]
+            y_batch = y[i:i+batch_size]
+            
+            logits = model(x_batch, training=False)
+            loss_value = tf.keras.losses.categorical_crossentropy(y_batch, logits, from_logits=True)
+            loss_value = tf.reduce_mean(loss_value)
+            pred = tf.nn.softmax(logits)
+            
+            predictions.append(pred)
+            losses.append(loss_value)
+        
+        if num_batches > 10:
+            print()  # New line after progress bar
+            
+        predictions = tf.concat(predictions, axis=0)
+        accuracy = 100.0 * np.sum(np.argmax(predictions, 1) == np.argmax(y, 1)) / predictions.shape[0]
+        loss = tf.reduce_mean(losses)
+        
+        return accuracy, loss.numpy()
+    
+    if params.max_epochs > 0:
+        log("================= TRAINING ==================")
+    else:
+        log("================== TESTING ==================")
+        log(f" Timestamp: {get_time_hhmmss()}")
+        log.sync()
+    
+    for epoch in range(params.max_epochs):
+        # Display epoch progress
+        epoch_progress = epoch / params.max_epochs * 100
+        progress_bar = '█' * int(epoch_progress / 2) + '-' * (50 - int(epoch_progress / 2))
+        print(f"\r[{progress_bar}] {epoch_progress:.1f}% - Epoch {epoch}/{params.max_epochs} ", end='', flush=True)
+        
+        # Train on whole randomised dataset in batches
+        batch_size = params.batch_size
+        # Show progress within epoch for large datasets
+        batch_progress_interval = max(1, len(X_train) // batch_size // 20)  # Show ~20 updates during an epoch
+        
+        # Shuffle the training data for each epoch
+        indices = np.random.permutation(len(X_train))
+        X_train_shuffled = X_train[indices]
+        y_train_shuffled = y_train[indices]
+        
+        for i in range(0, len(X_train_shuffled), batch_size):
+            batch_idx = i // batch_size
+            if batch_idx % batch_progress_interval == 0:
+                batch_progress = i / len(X_train_shuffled) * 100
+                print(f"\r[{progress_bar}] {epoch_progress:.1f}% - Epoch {epoch}/{params.max_epochs} - Batch progress: {batch_progress:.1f}% ", end='', flush=True)
+            
+            x_batch = X_train_shuffled[i:i+batch_size]
+            y_batch = y_train_shuffled[i:i+batch_size]
+            train_step(x_batch, y_batch)
+        
+        # If another significant epoch ended, we log our losses.
+        if epoch % params.log_epoch == 0:
+            # Get validation data predictions and log validation loss:
+            valid_accuracy, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid)
+            # Get training data predictions and log training loss:
+            train_accuracy, train_loss = get_accuracy_and_loss_in_batches(X_train, y_train)
+            if epoch % params.print_epoch == 0:
+                log(f"-------------- EPOCH {epoch:4d}/{params.max_epochs} --------------")
+                log(f" Train loss: {train_loss:.8f}, accuracy: {train_accuracy:.2f}%")
+                log(f" Validation loss: {valid_loss:.8f}, accuracy: {valid_accuracy:.2f}%")
+                log(f" Best loss: {early_stopping.best_monitored_value:.8f} at epoch {early_stopping.best_monitored_epoch}")
+                log(f" Elapsed time: {get_time_hhmmss(start)}")
                 log(f" Timestamp: {get_time_hhmmss()}")
                 log.sync()
             
-            for epoch in range(params.max_epochs):
-                current_epoch = epoch
-                
-                # Train on whole randomised dataset in batches
-                batch_size = params.batch_size
-                for i in range(0, len(X_train), batch_size):
-                    x_batch = X_train[i:i+batch_size]
-                    y_batch = y_train[i:i+batch_size]
-                    session.run([optimizer], feed_dict={tf_x_batch: x_batch, tf_y_batch: y_batch, is_training: True})
-                
-                # If another significant epoch ended, we log our losses.
-                if epoch % params.log_epoch == 0:
-                    # Get validation data predictions and log validation loss:
-                    valid_accuracy, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid)
-                    # Get training data predictions and log training loss:
-                    train_accuracy, train_loss = get_accuracy_and_loss_in_batches(X_train, y_train)
-                    if epoch % params.print_epoch == 0:
-                        log(f"-------------- EPOCH {epoch:4d}/{params.max_epochs} --------------")
-                        log(f" Train loss: {train_loss:.8f}, accuracy: {train_accuracy:.2f}%")
-                        log(f" Validation loss: {valid_loss:.8f}, accuracy: {valid_accuracy:.2f}%")
-                        log(f" Best loss: {early_stopping.best_monitored_value:.8f} at epoch {early_stopping.best_monitored_epoch}")
-                        log(f" Elapsed time: {get_time_hhmmss(start)}")
-                        log(f" Timestamp: {get_time_hhmmss()}")
-                        log.sync()
-                    else:
-                        valid_loss = 0.
-                        valid_accuracy = 0.
-                        train_loss = 0.
-                        train_accuracy = 0.
-                    
-                    valid_loss_history = np.append(valid_loss_history, [valid_loss])
-                    valid_accuracy_history = np.append(valid_accuracy_history, [valid_accuracy])
-                    train_loss_history = np.append(train_loss_history, [train_loss])
-                    train_accuracy_history = np.append(train_accuracy_history, [train_accuracy])
-                
-                if params.early_stopping_enabled:
-                    # Get validation data predictions and log validation loss:
-                    if valid_loss == 0:
-                        _, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid)
-                    if early_stopping(valid_loss, epoch):
-                        log(f"Early stopping.\nBest monitored loss was {early_stopping.best_monitored_value:.8f} at epoch {early_stopping.best_monitored_epoch}.")
-                        break
-            
-            # Evaluate on test dataset.
-            test_accuracy, test_loss = get_accuracy_and_loss_in_batches(X_test, y_test)
-            valid_accuracy, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid)
-            log("=============================================")
-            log(f" Valid loss: {valid_loss:.8f}, accuracy = {valid_accuracy:.2f}%")
-            log(f" Test loss: {test_loss:.8f}, accuracy = {test_loss:.2f}%")
-            log(f" Total time: {get_time_hhmmss(start)}")
-            log(f" Timestamp: {get_time_hhmmss()}")
-            
-            # Save model weights for future use.
-            saved_model_path = saver.save(session, paths.model_path)
-            log(f"Model file: {saved_model_path}")
-            
-            np.savez(paths.train_history_path, 
-                    train_loss_history=train_loss_history,
-                    train_accuracy_history=train_accuracy_history,
-                    valid_loss_history=valid_loss_history,
-                    valid_accuracy_history=valid_accuracy_history)
-            log(f"Train history file: {paths.train_history_path}")
-            log.sync(notify=True, message=f"Finished training with {test_accuracy:.2f}% accuracy on the testing set (loss = {test_loss:.6f}).")
-            
-            plot_learning_curves(params)
-            log.add_plot(notify=True, caption="Learning curves")
-            plt.show()
+            valid_loss_history = np.append(valid_loss_history, [valid_loss])
+            valid_accuracy_history = np.append(valid_accuracy_history, [valid_accuracy])
+            train_loss_history = np.append(train_loss_history, [train_loss])
+            train_accuracy_history = np.append(train_accuracy_history, [train_accuracy])
+        
+        if params.early_stopping_enabled:
+            # Get validation data predictions and log validation loss:
+            if 'valid_loss' not in locals():
+                _, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid)
+            if early_stopping(valid_loss, epoch):
+                log(f"Early stopping.\nBest monitored loss was {early_stopping.best_monitored_value:.8f} at epoch {early_stopping.best_monitored_epoch}.")
+                break
+    
+    # Evaluate on test dataset.
+    print("\nEvaluating on test dataset...")
+    test_accuracy, test_loss = get_accuracy_and_loss_in_batches(X_test, y_test)
+    valid_accuracy, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid)
+    log("=============================================")
+    log(f" Valid loss: {valid_loss:.8f}, accuracy = {valid_accuracy:.2f}%")
+    log(f" Test loss: {test_loss:.8f}, accuracy = {test_accuracy:.2f}%")
+    log(f" Total time: {get_time_hhmmss(start)}")
+    log(f" Timestamp: {get_time_hhmmss()}")
+    
+    # Save model weights for future use.
+    saved_model_path = checkpoint_manager.save()
+    log(f"Model file: {saved_model_path}")
+    
+    # Also save as a complete Keras model
+    model_save_path = os.path.join(paths.root_path, "keras_model")
+    model.save(model_save_path)
+    log(f"Keras model saved to: {model_save_path}")
+    
+    np.savez(paths.train_history_path, 
+            train_loss_history=train_loss_history,
+            train_accuracy_history=train_accuracy_history,
+            valid_loss_history=valid_loss_history,
+            valid_accuracy_history=valid_accuracy_history)
+    log(f"Train history file: {paths.train_history_path}")
+    log.sync(notify=True, message=f"Finished training with {test_accuracy:.2f}% accuracy on the testing set (loss = {test_loss:.6f}).")
+    
+    plot_learning_curves(params)
+    log.add_plot(notify=True, caption="Learning curves")
+    plt.show()
 
 class Paths:
     def __init__(self, params):

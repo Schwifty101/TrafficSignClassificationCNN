@@ -16,6 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description='Traffic Sign Classification')
     parser.add_argument('--mode', choices=['train', 'evaluate', 'predict'], default='train')
     parser.add_argument('--config', default='config.json')
+    parser.add_argument('--create-visualization', action='store_true', help='Create extended dataset for class distribution visualization')
     args = parser.parse_args()
     
     print("Loading configuration...")
@@ -50,21 +51,26 @@ def main():
     X_train, y_train = preprocess_dataset(X_train, y_train)
     X_test, y_test = preprocess_dataset(X_test, y_test)
     
-    print("Creating balanced dataset...")
-    X_train_balanced, y_train_balanced = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, counts=np.full(43, 20000, dtype=int))
-    
-    print("Creating extended dataset for class distribution visualization...")
-    X_train_extended, y_train_extended = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, counts=np.array([np.sum(y_train == c) for c in range(43)]) * 20)
-    
-    if not os.path.exists('data/train_balanced.p'):
+    # Only create balanced dataset if needed and doesn't exist already
+    balanced_pickle_path = 'data/train_balanced.p'
+    if args.mode == 'train' and (not os.path.exists(balanced_pickle_path) or os.path.getsize(balanced_pickle_path) == 0):
+        print("Creating balanced dataset...")
+        X_train_balanced, y_train_balanced = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, counts=np.full(43, 20000, dtype=int))
+        
         print("Saving balanced dataset to disk...")
-        with open('data/train_balanced.p', 'wb') as f:
+        with open(balanced_pickle_path, 'wb') as f:
             pickle.dump({'features': X_train_balanced, 'labels': y_train_balanced}, f)
     
-    if not os.path.exists('data/train_extended.p'):
-        print("Saving extended dataset to disk...")
-        with open('data/train_extended.p', 'wb') as f:
-            pickle.dump({'features': X_train_extended, 'labels': y_train_extended}, f)
+    # Only create extended dataset for visualization if explicitly requested
+    if args.create_visualization:
+        extended_pickle_path = 'data/train_extended.p'
+        if not os.path.exists(extended_pickle_path) or os.path.getsize(extended_pickle_path) == 0:
+            print("Creating extended dataset for class distribution visualization...")
+            X_train_extended, y_train_extended = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, counts=np.array([np.sum(y_train == c) for c in range(43)]) * 20)
+            
+            print("Saving extended dataset to disk...")
+            with open(extended_pickle_path, 'wb') as f:
+                pickle.dump({'features': X_train_extended, 'labels': y_train_extended}, f)
     
     if args.mode == 'train':
         print("Training mode selected.")

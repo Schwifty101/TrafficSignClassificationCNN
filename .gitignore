@@ -6,3 +6,5 @@ data/train
 data/*.p
 
 config.json
+
+models
