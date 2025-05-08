@@ -24,6 +24,7 @@ This project implements a CNN architecture to classify traffic signs. It include
 ```
 ├── config.json           # Configuration file for email notifications
 ├── data_loader.py        # Utilities for loading pickle data
+├── data_visualizer.py    # Visualizing data, graphical format
 ├── data_processor.py     # Data preprocessing and augmentation
 ├── evaluator.py          # Model evaluation utilities
 ├── main.py               # Main entry point for the application
