@@ -15,17 +15,48 @@ from email.mime.image import MIMEImage
 # Use TF2.x compatibility
 print("Using TensorFlow version:", tf.__version__)
 
-# Configure GPU memory growth to avoid OOM errors
+# Configure TensorFlow to use both CPU and GPU efficiently
 gpus = tf.config.list_physical_devices('GPU')
+cpus = tf.config.list_physical_devices('CPU')
+
+# Set TensorFlow to use mixed precision for better GPU performance
+try:
+    policy = tf.keras.mixed_precision.Policy('mixed_float16')
+    tf.keras.mixed_precision.set_global_policy(policy)
+    print("Mixed precision policy set to mixed_float16")
+except Exception as e:
+    print(f"Could not set mixed precision policy: {e}")
+
+# Configure inter/intra parallelism for better CPU utilization
+cpu_count = os.cpu_count() or 4
+tf.config.threading.set_inter_op_parallelism_threads(cpu_count)  # Number of CPU cores for parallel operations
+tf.config.threading.set_intra_op_parallelism_threads(cpu_count)  # Number of CPU threads per operation
+print(f"CPU threading configured with {cpu_count} threads")
+
+# Configure GPU memory growth to avoid OOM errors
 if gpus:
     try:
-        # Currently, memory growth needs to be the same across GPUs
+        # Enable memory growth on all GPUs
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
-        print(f"Found {len(gpus)} GPU(s), memory growth enabled")
+        
+        # Configure memory limits for GPUs if needed
+        # In TF 2.x, we use tf.config instead of the old session approach
+        for i, gpu in enumerate(gpus):
+            memory_limit = int(0.85 * 1024 * 1024 * 1024)  # 85% of total memory in bytes
+            try:
+                tf.config.set_logical_device_configuration(
+                    gpu,
+                    [tf.config.LogicalDeviceConfiguration(memory_limit=memory_limit)]
+                )
+            except Exception as e:
+                print(f"Could not set memory limit for GPU {i}: {e}")
+        
+        print(f"Found {len(gpus)} GPU(s), memory growth enabled, using 85% memory fraction")
     except RuntimeError as e:
-        # Memory growth must be set before GPUs have been initialized
-        print(e)
+        print(f"GPU configuration error: {e}")
+else:
+    print("No GPUs found, running on CPU only")
 
 class EarlyStopping:
     def __init__(self, checkpoint, patience=100, minimize=True):
@@ -137,6 +168,9 @@ class ModelCloudLog:
             self.send_email_notification(f"Training update: {caption}", learning_curves_path)
 
 def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logger_config):
+    # Record start time for overall timing
+    training_start_time = time.time()
+    
     # Convert input data to float32 if needed
     if X_train.dtype != np.float32:
         print(f"Converting input data from {X_train.dtype} to float32")
@@ -144,10 +178,41 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
         X_valid = X_valid.astype(np.float32)
         X_test = X_test.astype(np.float32)
     
-    # Normalize the data to [0, 1] range
-    X_train /= 255.0
-    X_valid /= 255.0
-    X_test /= 255.0
+    # Normalize the data to [0, 1] range if not already
+    if X_train.max() > 1.0:
+        print("Normalizing data to [0, 1] range")
+        X_train /= 255.0
+        X_valid /= 255.0
+        X_test /= 255.0
+    
+    # Create efficient data pipelines using tf.data
+    print("Creating optimized data pipelines for CPU/GPU coordination...")
+    
+    # Get the number of CPU cores for parallel processing
+    cpu_count = os.cpu_count() or 4  # Fallback to 4 if detection fails
+    
+    # Calculate buffer sizes based on available memory and dataset size
+    shuffle_buffer = min(len(X_train), 10000)  # Limit buffer size for large datasets
+    prefetch_buffer = tf.data.AUTOTUNE  # Let TensorFlow optimize prefetch size
+    
+    # Create training dataset with prefetching and parallel processing
+    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_dataset = train_dataset.cache()  # Cache the dataset in memory
+    train_dataset = train_dataset.shuffle(buffer_size=shuffle_buffer)
+    train_dataset = train_dataset.batch(params.batch_size)
+    train_dataset = train_dataset.prefetch(prefetch_buffer)  # Prefetch next batch while GPU processes current batch
+    
+    # Create validation dataset
+    valid_dataset = tf.data.Dataset.from_tensor_slices((X_valid, y_valid))
+    valid_dataset = valid_dataset.batch(params.batch_size)
+    valid_dataset = valid_dataset.prefetch(prefetch_buffer)
+    
+    # Create test dataset
+    test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
+    test_dataset = test_dataset.batch(params.batch_size)
+    test_dataset = test_dataset.prefetch(prefetch_buffer)
+    
+    print(f"Data pipeline created with {cpu_count} parallel workers and automatic prefetching")
     
     paths = Paths(params)
     log = ModelCloudLog(
@@ -177,14 +242,22 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
     else:
         learning_rate = params.learning_rate
     
-    # Create optimizer
+    # Create optimizer optimized for mixed precision training
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     
-    # Compile the model for better performance
+    # Check if mixed precision is available and being used
+    if tf.keras.mixed_precision.global_policy().name == 'mixed_float16':
+        # When using mixed precision, use loss scaling to improve numerical stability
+        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
+        print("Using mixed precision with LossScaleOptimizer")
+    
+    # Compile the model with optimized settings
     model.compile(
         optimizer=optimizer,
         loss=tf.keras.losses.CategoricalCrossentropy(from_logits=True),
-        metrics=['accuracy']
+        metrics=['accuracy'],
+        # Enable XLA compilation for faster execution
+        jit_compile=True
     )
     
     # Create a sample input to build the model
@@ -353,8 +426,8 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
     valid_loss_history = np.empty([0], dtype=np.float32)
     valid_accuracy_history = np.empty([0], dtype=np.float32)
     
-    # Define the training step
-    @tf.function
+    # Define the training step with XLA compilation for better GPU performance
+    @tf.function(jit_compile=True)
     def train_step(x, y):
         with tf.GradientTape() as tape:
             logits = model(x, training=True)
@@ -373,7 +446,7 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
         
         gradients = tape.gradient(loss_value, model.trainable_variables)
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-        return loss_value
+        return loss_value, tf.reduce_mean(tf.cast(tf.equal(tf.argmax(logits, axis=1), tf.argmax(y, axis=1)), tf.float32))
     
     if params.max_epochs > 0:
         log("================= TRAINING ==================")
@@ -382,59 +455,109 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
         log(f" Timestamp: {get_time_hhmmss()}")
         log.sync()
     
+    # Main training loop using tf.data pipeline for better performance
     for epoch in range(params.max_epochs):
+        # Reset metrics for this epoch
+        epoch_loss_avg = tf.keras.metrics.Mean()
+        epoch_accuracy = tf.keras.metrics.CategoricalAccuracy()
+        
         # Display epoch progress
         epoch_progress = epoch / params.max_epochs * 100
         progress_bar = '█' * int(epoch_progress / 2) + '-' * (50 - int(epoch_progress / 2))
         print(f"\r[{progress_bar}] {epoch_progress:.1f}% - Epoch {epoch}/{params.max_epochs} ", end='', flush=True)
         
-        # Train on whole randomised dataset in batches
-        batch_size = params.batch_size
-        # Show progress within epoch for large datasets
-        batch_progress_interval = max(1, len(X_train) // batch_size // 20)  # Show ~20 updates during an epoch
+        # Track time per epoch
+        epoch_start_time = time.time()
         
-        # Shuffle the training data for each epoch
-        indices = np.random.permutation(len(X_train))
-        X_train_shuffled = X_train[indices]
-        y_train_shuffled = y_train[indices]
+        # Train on batches from tf.data pipeline
+        step = 0
+        total_steps = len(X_train) // params.batch_size
         
-        for i in range(0, len(X_train_shuffled), batch_size):
-            batch_idx = i // batch_size
-            if batch_idx % batch_progress_interval == 0:
-                batch_progress = i / len(X_train_shuffled) * 100
+        for x_batch, y_batch in train_dataset:
+            # Update progress within epoch
+            if step % max(1, total_steps // 20) == 0:  # Show ~20 updates during an epoch
+                batch_progress = step / total_steps * 100
                 print(f"\r[{progress_bar}] {epoch_progress:.1f}% - Epoch {epoch}/{params.max_epochs} - Batch progress: {batch_progress:.1f}% ", end='', flush=True)
             
-            x_batch = X_train_shuffled[i:i+batch_size]
-            y_batch = y_train_shuffled[i:i+batch_size]
-            train_step(x_batch, y_batch)
+            # Perform training step
+            loss_value, accuracy = train_step(x_batch, y_batch)
+            
+            # Update metrics
+            epoch_loss_avg.update_state(loss_value)
+            epoch_accuracy.update_state(y_batch, model(x_batch, training=False))
+            
+            step += 1
         
         # If another significant epoch ended, we log our losses.
         if epoch % params.log_epoch == 0:
-            # Get validation data predictions and log validation loss:
-            valid_accuracy, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid, subset_percentage=0.2)
-            # Get training data predictions and log training loss:
-            train_accuracy, train_loss = get_accuracy_and_loss_in_batches(X_train, y_train, subset_percentage=0.1)
+            # Get validation metrics using our optimized dataset
+            valid_loss_avg = tf.keras.metrics.Mean()
+            valid_accuracy_metric = tf.keras.metrics.CategoricalAccuracy()
+            
+            # Use the validation dataset for evaluation
+            for x_valid_batch, y_valid_batch in valid_dataset:
+                # Get model predictions
+                valid_predictions = model(x_valid_batch, training=False)
+                
+                # Calculate validation loss
+                v_loss = tf.reduce_mean(
+                    tf.keras.losses.categorical_crossentropy(y_valid_batch, valid_predictions, from_logits=True)
+                )
+                
+                # Update metrics
+                valid_loss_avg.update_state(v_loss)
+                valid_accuracy_metric.update_state(y_valid_batch, valid_predictions)
+            
+            # Get the current metrics
+            train_loss = epoch_loss_avg.result().numpy()
+            train_accuracy = epoch_accuracy.result().numpy() * 100
+            valid_loss = valid_loss_avg.result().numpy()
+            valid_accuracy = valid_accuracy_metric.result().numpy() * 100
+            
+            # Update histories
+            train_loss_history = np.append(train_loss_history, train_loss)
+            train_accuracy_history = np.append(train_accuracy_history, train_accuracy)
+            valid_loss_history = np.append(valid_loss_history, valid_loss)
+            valid_accuracy_history = np.append(valid_accuracy_history, valid_accuracy)
+            
+            # Check early stopping condition
+            if params.early_stopping_enabled:
+                # Here we pass our validation loss to early stopping which
+                # will save a checkpoint if improved or terminate if stalled for too long
+                if early_stopping(valid_loss, epoch):
+                    log(f"Early stopping triggered at epoch {epoch}.")
+                    log(f"Best monitored loss was {early_stopping.best_monitored_value:.8f} at epoch {early_stopping.best_monitored_epoch}.")
+                    break
+            
+            # Log results
             if epoch % params.print_epoch == 0:
+                epoch_time = time.time() - epoch_start_time
                 log(f"-------------- EPOCH {epoch:4d}/{params.max_epochs} --------------")
                 log(f" Train loss: {train_loss:.8f}, accuracy: {train_accuracy:.2f}%")
                 log(f" Validation loss: {valid_loss:.8f}, accuracy: {valid_accuracy:.2f}%")
                 log(f" Best loss: {early_stopping.best_monitored_value:.8f} at epoch {early_stopping.best_monitored_epoch}")
-                log(f" Elapsed time: {get_time_hhmmss(start)}")
+                log(f" Epoch time: {epoch_time:.2f}s, Total time: {get_time_hhmmss(start)}")
+                
+                # Create a plot of learning curves
+                plt.figure(figsize=(12, 4))
+                plt.subplot(1, 2, 1)
+                plt.plot(train_loss_history, label='Train')
+                plt.plot(valid_loss_history, label='Validation')
+                plt.title('Loss')
+                plt.legend()
+                
+                plt.subplot(1, 2, 2)
+                plt.plot(train_accuracy_history, label='Train')
+                plt.plot(valid_accuracy_history, label='Validation')
+                plt.title('Accuracy')
+                plt.legend()
+                
+                log.add_plot(
+                    notify=(epoch > 0 and epoch % 10 == 0), 
+                    caption=f"Epoch {epoch}/{params.max_epochs}: Train acc={train_accuracy:.2f}%, Valid acc={valid_accuracy:.2f}%"
+                )
                 log(f" Timestamp: {get_time_hhmmss()}")
                 log.sync()
-            
-            valid_loss_history = np.append(valid_loss_history, [valid_loss])
-            valid_accuracy_history = np.append(valid_accuracy_history, [valid_accuracy])
-            train_loss_history = np.append(train_loss_history, [train_loss])
-            train_accuracy_history = np.append(train_accuracy_history, [train_accuracy])
-        
-        if params.early_stopping_enabled:
-            # Get validation data predictions and log validation loss:
-            if 'valid_loss' not in locals():
-                _, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid)
-            if early_stopping(valid_loss, epoch):
-                log(f"Early stopping.\nBest monitored loss was {early_stopping.best_monitored_value:.8f} at epoch {early_stopping.best_monitored_epoch}.")
-                break
     
     # Evaluate on test dataset.
     print("\nEvaluating on test dataset...")

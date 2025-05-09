@@ -10,6 +10,9 @@ class AugmentedSignsBatchIterator:
         self.seed = seed
         self.p = p
         self.intensity = intensity
+        # Set the random seed for reproducibility
+        random.seed(seed)
+        np.random.seed(seed)
 
     def __call__(self, X, y):
         return self._get_batches(X, y)
@@ -30,74 +33,81 @@ class AugmentedSignsBatchIterator:
         return Xb, yb
 
     def _transform(self, Xb, yb):
+        """
+        Optimized transformation pipeline that processes whole batches at once where possible
+        and properly handles value ranges.
+        """
         # Make a copy to avoid modifying the original data
         Xb_augmented = Xb.copy()
         
-        # Apply rotations
-        Xb_augmented = self.rotate(Xb_augmented)
+        # Check if images are normalized [0,1] or in [0,255] range
+        is_normalized = Xb.max() <= 1.0
+        max_val = 1.0 if is_normalized else 255.0
+        
+        # Apply rotations to the entire batch at once
+        Xb_augmented = self.rotate_batch(Xb_augmented, max_val)
         
         # Apply projection transforms
-        Xb_augmented = self.apply_projection_transform(Xb_augmented, Xb_augmented.shape[1])
+        Xb_augmented = self.apply_projection_transform_batch(Xb_augmented, max_val)
         
         # Apply additional transformations based on intensity
         if self.intensity > 0.3:
             # Apply brightness changes
-            Xb_augmented = self.adjust_brightness(Xb_augmented)
+            Xb_augmented = self.adjust_brightness_batch(Xb_augmented, max_val)
             
         if self.intensity > 0.5:
             # Apply blur or sharpening
-            Xb_augmented = self.adjust_sharpness(Xb_augmented)
+            Xb_augmented = self.adjust_sharpness_batch(Xb_augmented, max_val)
             
         if self.intensity > 0.7:
             # Apply noise
-            Xb_augmented = self.add_noise(Xb_augmented)
+            Xb_augmented = self.add_noise_batch(Xb_augmented, max_val)
         
         return Xb_augmented, yb
 
-    def rotate(self, Xb):
+    def rotate_batch(self, Xb, max_val):
+        """Optimized version that processes entire batch at once."""
         batch_size = Xb.shape[0]
-        # Increase the rotation range based on intensity
-        # At intensity=1.0, this will allow rotations up to 45 degrees
-        delta = 45.0 * self.intensity  
+        delta = 45.0 * self.intensity  # Max rotation angle
         
-        for i in np.random.choice(batch_size, int(batch_size * self.p), replace=False):
-            # Remember the original range
-            orig_min, orig_max = Xb[i].min(), Xb[i].max()
-            is_int_type = Xb[i].dtype in [np.uint8, np.uint16, np.int8, np.int16, np.int32]
+        # Select images to transform
+        indices = np.random.choice(batch_size, int(batch_size * self.p), replace=False)
+        
+        # Apply rotation to selected images
+        for i in indices:
+            # Normalize if needed
+            need_normalization = max_val > 1.0
+            img = Xb[i] / max_val if need_normalization else Xb[i]
             
-            # Normalize to [0,1] for skimage functions if needed
-            img_normalized = Xb[i]
-            if orig_max > 1.0:
-                img_normalized = Xb[i] / 255.0
-                
-            # Apply rotation with a random angle within the range
+            # Apply rotation
             angle = random.uniform(-delta, delta)
-            rotated = rotate(img_normalized, angle, mode='edge')
+            rotated = rotate(img, angle, mode='edge')
             
-            # Restore original range
-            if orig_max > 1.0:
-                rotated = rotated * 255.0
-                if is_int_type:
-                    rotated = np.clip(rotated, 0, 255).astype(Xb[i].dtype)
-                    
+            # Convert back to original range if needed
+            if need_normalization:
+                rotated = rotated * max_val
+                
             Xb[i] = rotated
             
         return Xb
 
-    def apply_projection_transform(self, Xb, image_size):
-        # Scale the distortion based on intensity
-        # At intensity=1.0, distortion can be up to 40% of image size
+    def apply_projection_transform_batch(self, Xb, max_val):
+        """Optimized version for applying projection transforms."""
+        batch_size = Xb.shape[0]
+        image_size = Xb.shape[1]  # Assuming square images
+        
+        # Scale distortion based on intensity
         d = image_size * 0.4 * self.intensity
-        for i in np.random.choice(Xb.shape[0], int(Xb.shape[0] * self.p), replace=False):
-            # Remember the original range
-            orig_min, orig_max = Xb[i].min(), Xb[i].max()
-            is_int_type = Xb[i].dtype in [np.uint8, np.uint16, np.int8, np.int16, np.int32]
+        
+        # Select images to transform
+        indices = np.random.choice(batch_size, int(batch_size * self.p), replace=False)
+        
+        for i in indices:
+            # Normalize if needed
+            need_normalization = max_val > 1.0
+            img = Xb[i] / max_val if need_normalization else Xb[i]
             
-            # Normalize to [0,1] for skimage functions if needed
-            img_normalized = Xb[i]
-            if orig_max > 1.0:
-                img_normalized = Xb[i] / 255.0
-            
+            # Generate random distortion points
             tl_top = random.uniform(-d, d)
             tl_left = random.uniform(-d, d)
             bl_bottom = random.uniform(-d, d)
@@ -107,6 +117,7 @@ class AugmentedSignsBatchIterator:
             br_bottom = random.uniform(-d, d)
             br_right = random.uniform(-d, d)
             
+            # Create and apply transform
             transform = ProjectiveTransform()
             transform.estimate(np.array([
                 (tl_left, tl_top),
@@ -120,27 +131,25 @@ class AugmentedSignsBatchIterator:
                 (image_size, 0)
             ]))
             
-            warped = warp(img_normalized, transform, output_shape=(image_size, image_size), order=1, mode='edge')
+            warped = warp(img, transform, output_shape=(image_size, image_size), order=1, mode='edge')
             
-            # Restore original range
-            if orig_max > 1.0:
-                warped = warped * 255.0
-                if is_int_type:
-                    warped = np.clip(warped, 0, 255).astype(Xb[i].dtype)
-                    
+            # Convert back to original range if needed
+            if need_normalization:
+                warped = warped * max_val
+                
             Xb[i] = warped
+            
         return Xb
         
-    def adjust_brightness(self, Xb):
-        """Adjust brightness of images based on intensity parameter"""
+    def adjust_brightness_batch(self, Xb, max_val):
+        """Optimized brightness adjustment for batches."""
         batch_size = Xb.shape[0]
         brightness_range = 0.4 * self.intensity
         
-        for i in np.random.choice(batch_size, int(batch_size * self.p), replace=False):
-            # Check the value range
-            is_normalized = Xb[i].max() <= 1.0
-            max_val = 1.0 if is_normalized else 255.0
-            
+        # Select images to transform
+        indices = np.random.choice(batch_size, int(batch_size * self.p), replace=False)
+        
+        for i in indices:
             # Randomly brighten or darken the image
             factor = 1.0 + random.uniform(-brightness_range, brightness_range)
             
@@ -149,16 +158,15 @@ class AugmentedSignsBatchIterator:
         
         return Xb
         
-    def adjust_sharpness(self, Xb):
-        """Add blur or sharpen images based on intensity parameter"""
+    def adjust_sharpness_batch(self, Xb, max_val):
+        """Optimized sharpness/blur adjustment for batches."""
         from scipy import ndimage
         batch_size = Xb.shape[0]
         
-        for i in np.random.choice(batch_size, int(batch_size * self.p), replace=False):
-            # Check the value range
-            is_normalized = Xb[i].max() <= 1.0
-            max_val = 1.0 if is_normalized else 255.0
-            
+        # Select images to transform
+        indices = np.random.choice(batch_size, int(batch_size * self.p), replace=False)
+        
+        for i in indices:
             # Decide whether to blur or sharpen
             if random.random() < 0.5:
                 # Apply Gaussian blur
@@ -179,25 +187,24 @@ class AugmentedSignsBatchIterator:
                     
         return Xb
                 
-    def add_noise(self, Xb):
-        """Add random noise to images based on intensity parameter"""
+    def add_noise_batch(self, Xb, max_val):
+        """Optimized noise addition for batches."""
         batch_size = Xb.shape[0]
         
-        for i in np.random.choice(batch_size, int(batch_size * self.p), replace=False):
+        # Select images to transform
+        indices = np.random.choice(batch_size, int(batch_size * self.p), replace=False)
+        
+        for i in indices:
             # Determine noise scale based on image range and intensity
-            is_normalized = Xb[i].max() <= 1.0
-            
-            if is_normalized:
+            if max_val <= 1.0:
                 noise_scale = 0.1 * self.intensity  # For [0,1] range
-                max_val = 1.0
             else:
                 noise_scale = 25.0 * self.intensity  # For [0,255] range
-                max_val = 255
             
             # Generate noise
             noise = np.random.normal(0, noise_scale, Xb[i].shape)
             
             # Add noise to image
             Xb[i] = np.clip(Xb[i] + noise, 0, max_val)
-            
+                
         return Xb
