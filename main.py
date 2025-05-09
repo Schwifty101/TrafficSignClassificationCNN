@@ -84,10 +84,10 @@ def main():
             num_classes=43,
             image_size=(32, 32),
             batch_size=256,
-            max_epochs=400,
+            max_epochs=200,
             log_epoch=1,
             print_epoch=1,
-            learning_rate_decay=True,  # Enable learning rate decay
+            learning_rate_decay=False,  # Enable learning rate decay
             learning_rate=0.001,  # Increased from 0.0001 to 0.001 (10x higher)
             l2_reg_enabled=True,
             l2_lambda=0.0001,
