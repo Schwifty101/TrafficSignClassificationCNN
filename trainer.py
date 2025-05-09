@@ -15,6 +15,18 @@ from email.mime.image import MIMEImage
 # Use TF2.x compatibility
 print("Using TensorFlow version:", tf.__version__)
 
+# Configure GPU memory growth to avoid OOM errors
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        # Currently, memory growth needs to be the same across GPUs
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print(f"Found {len(gpus)} GPU(s), memory growth enabled")
+    except RuntimeError as e:
+        # Memory growth must be set before GPUs have been initialized
+        print(e)
+
 class EarlyStopping:
     def __init__(self, checkpoint, patience=100, minimize=True):
         self.minimize = minimize
@@ -175,74 +187,15 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
     _ = model(sample_input, training=False)
     model.summary()
     
-    # Checkpoints for saving model
-    checkpoint_dir = os.path.dirname(paths.model_path)
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    checkpoint_manager = tf.train.CheckpointManager(
-        checkpoint, directory=checkpoint_dir, max_to_keep=3
-    )
-    
-    class CustomCheckpoint:
-        def __init__(self, checkpoint_manager):
-            self.manager = checkpoint_manager
+    # Function to evaluate model (moved earlier to make it available for checkpoint restoration)
+    def get_accuracy_and_loss_in_batches(X, y, subset_percentage=1.0):
+        # Use a subset of data for faster evaluation during training
+        if subset_percentage < 1.0 and len(X) > 1000:
+            subset_size = int(len(X) * subset_percentage)
+            indices = np.random.choice(len(X), subset_size, replace=False)
+            X = X[indices]
+            y = y[indices]
             
-        def save(self):
-            self.manager.save()
-            
-        def restore(self):
-            if self.manager.latest_checkpoint:
-                checkpoint.restore(self.manager.latest_checkpoint)
-                return True
-            return False
-    
-    # Create checkpoint wrapper for early stopping
-    custom_checkpoint = CustomCheckpoint(checkpoint_manager)
-    
-    # Try to restore previous model if requested
-    if params.resume_training:
-        try:
-            if custom_checkpoint.restore():
-                log("Restored previously trained model.")
-            else:
-                log("No checkpoint found, starting from scratch.")
-        except Exception as e:
-            log(f"Failed restoring previously trained model: {e}")
-    
-    # Initialize early stopping
-    early_stopping = EarlyStopping(custom_checkpoint, patience=params.early_stopping_patience, minimize=True)
-    
-    # Training history
-    train_loss_history = np.empty([0], dtype=np.float32)
-    train_accuracy_history = np.empty([0], dtype=np.float32)
-    valid_loss_history = np.empty([0], dtype=np.float32)
-    valid_accuracy_history = np.empty([0], dtype=np.float32)
-    
-    # Define the training step
-    @tf.function
-    def train_step(x, y):
-        with tf.GradientTape() as tape:
-            logits = model(x, training=True)
-            loss_value = tf.keras.losses.categorical_crossentropy(y, logits, from_logits=True)
-            loss_value = tf.reduce_mean(loss_value)
-            
-            # Add L2 regularization if enabled
-            if params.l2_reg_enabled:
-                l2_losses = []
-                for var in model.trainable_variables:
-                    if 'kernel' in var.name or 'weights' in var.name:
-                        l2_losses.append(tf.nn.l2_loss(var))
-                if l2_losses:
-                    l2_loss = tf.add_n(l2_losses)
-                    loss_value += params.l2_lambda * l2_loss
-        
-        gradients = tape.gradient(loss_value, model.trainable_variables)
-        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-        return loss_value
-    
-    # Function to evaluate model
-    def get_accuracy_and_loss_in_batches(X, y):
         predictions = []
         losses = []
         batch_size = 128
@@ -277,6 +230,145 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
         loss = tf.reduce_mean(losses)
         
         return accuracy, loss.numpy()
+    
+    # Checkpoints for saving model
+    checkpoint_dir = os.path.dirname(paths.model_path)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
+    checkpoint_manager = tf.train.CheckpointManager(
+        checkpoint, directory=checkpoint_dir, max_to_keep=3
+    )
+    
+    class CustomCheckpoint:
+        def __init__(self, checkpoint_manager):
+            self.manager = checkpoint_manager
+            
+        def save(self):
+            self.manager.save()
+            
+        def restore(self):
+            if self.manager.latest_checkpoint:
+                checkpoint.restore(self.manager.latest_checkpoint)
+                return True
+            return False
+    
+    # Create checkpoint wrapper for early stopping
+    custom_checkpoint = CustomCheckpoint(checkpoint_manager)
+    
+    # Initialize early stopping
+    early_stopping = EarlyStopping(custom_checkpoint, patience=params.early_stopping_patience, minimize=True)
+    
+    # Try to restore previous model if requested
+    if params.resume_training:
+        try:
+            # Try direct restore of TF checkpoint first
+            if os.path.exists(checkpoint_dir + "/checkpoint"):
+                latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
+                if latest_checkpoint:
+                    # Direct checkpoint restore
+                    status = checkpoint.restore(latest_checkpoint)
+                    status.expect_partial()  # Allow partial restore without warnings
+                    log(f"Directly restored previously trained model from {latest_checkpoint}")
+                    
+                    # Extract epoch number from checkpoint name if possible
+                    try:
+                        checkpoint_name = os.path.basename(latest_checkpoint)
+                        if '-' in checkpoint_name:
+                            checkpoint_epoch = int(checkpoint_name.split('-')[1])
+                            early_stopping.best_monitored_epoch = checkpoint_epoch
+                            log(f"Set best monitored epoch to {checkpoint_epoch}")
+                    except:
+                        pass
+                        
+                    # Ensure optimizer state is properly warmed up with multiple steps
+                    log("Warming up optimizer state...")
+                    for i in range(3):  # Run a few steps to ensure proper optimizer state
+                        dummy_data = X_train[i*params.batch_size:(i+1)*params.batch_size]
+                        dummy_labels = y_train[i*params.batch_size:(i+1)*params.batch_size]
+                        
+                        # Run optimization step
+                        with tf.GradientTape() as tape:
+                            logits = model(dummy_data, training=True)
+                            loss_value = tf.keras.losses.categorical_crossentropy(dummy_labels, logits, from_logits=True)
+                            loss_value = tf.reduce_mean(loss_value)
+                            
+                        gradients = tape.gradient(loss_value, model.trainable_variables)
+                        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+                    
+                    # Evaluate to set early stopping variables appropriately
+                    val_acc, val_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid, subset_percentage=0.2)
+                    early_stopping.best_monitored_value = val_loss
+                    log(f"Set best monitored value to {val_loss:.8f}")
+                    log("Optimizer state reactivated and early stopping initialized")
+                else:
+                    # Fallback to using our custom checkpoint manager
+                    if custom_checkpoint.restore():
+                        log("Restored previously trained model via checkpoint manager.")
+                        # Rest of optimization warm-up
+                        dummy_data = X_train[:params.batch_size]
+                        dummy_labels = y_train[:params.batch_size]
+                        
+                        with tf.GradientTape() as tape:
+                            logits = model(dummy_data, training=True)
+                            loss_value = tf.keras.losses.categorical_crossentropy(dummy_labels, logits, from_logits=True)
+                            loss_value = tf.reduce_mean(loss_value)
+                            
+                        gradients = tape.gradient(loss_value, model.trainable_variables)
+                        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+                        
+                        log("Optimizer state reactivated.")
+                    else:
+                        log("No checkpoint found, starting from scratch.")
+            else:
+                # Fallback to using our custom checkpoint manager
+                if custom_checkpoint.restore():
+                    log("Restored previously trained model via checkpoint manager.")
+                    # Rest of optimization warm-up
+                    dummy_data = X_train[:params.batch_size]
+                    dummy_labels = y_train[:params.batch_size]
+                    
+                    with tf.GradientTape() as tape:
+                        logits = model(dummy_data, training=True)
+                        loss_value = tf.keras.losses.categorical_crossentropy(dummy_labels, logits, from_logits=True)
+                        loss_value = tf.reduce_mean(loss_value)
+                        
+                    gradients = tape.gradient(loss_value, model.trainable_variables)
+                    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+                    
+                    log("Optimizer state reactivated.")
+                else:
+                    log("No checkpoint found, starting from scratch.")
+        except Exception as e:
+            log(f"Failed restoring previously trained model: {e}")
+    
+    # Training history
+    train_loss_history = np.empty([0], dtype=np.float32)
+    train_accuracy_history = np.empty([0], dtype=np.float32)
+    valid_loss_history = np.empty([0], dtype=np.float32)
+    valid_accuracy_history = np.empty([0], dtype=np.float32)
+    
+    # Define the training step
+    @tf.function
+    def train_step(x, y):
+        with tf.GradientTape() as tape:
+            logits = model(x, training=True)
+            loss_value = tf.keras.losses.categorical_crossentropy(y, logits, from_logits=True)
+            loss_value = tf.reduce_mean(loss_value)
+            
+            # Add L2 regularization if enabled
+            if params.l2_reg_enabled:
+                l2_losses = []
+                for var in model.trainable_variables:
+                    if 'kernel' in var.name or 'weights' in var.name:
+                        l2_losses.append(tf.nn.l2_loss(var))
+                if l2_losses:
+                    l2_loss = tf.add_n(l2_losses)
+                    loss_value += params.l2_lambda * l2_loss
+        
+        gradients = tape.gradient(loss_value, model.trainable_variables)
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        return loss_value
     
     if params.max_epochs > 0:
         log("================= TRAINING ==================")
@@ -314,9 +406,9 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
         # If another significant epoch ended, we log our losses.
         if epoch % params.log_epoch == 0:
             # Get validation data predictions and log validation loss:
-            valid_accuracy, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid)
+            valid_accuracy, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid, subset_percentage=0.2)
             # Get training data predictions and log training loss:
-            train_accuracy, train_loss = get_accuracy_and_loss_in_batches(X_train, y_train)
+            train_accuracy, train_loss = get_accuracy_and_loss_in_batches(X_train, y_train, subset_percentage=0.1)
             if epoch % params.print_epoch == 0:
                 log(f"-------------- EPOCH {epoch:4d}/{params.max_epochs} --------------")
                 log(f" Train loss: {train_loss:.8f}, accuracy: {train_accuracy:.2f}%")

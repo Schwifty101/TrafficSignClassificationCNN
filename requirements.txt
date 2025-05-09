@@ -1,6 +1,7 @@
 numpy 
 matplotlib 
-tensorflow 
+tensorflow-macos
+tensorflow-metal
 pandas 
 scikit-learn 
 scikit-image
