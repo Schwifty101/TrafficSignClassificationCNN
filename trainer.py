@@ -59,7 +59,7 @@ class ModelCloudLog:
 
     def log_parameters(self, params, train_size, valid_size, test_size):
         self("=============================================")
-        self("============= RESUMING TRAINING =============")
+        self("=============== TRAINING DATA ===============")
         self("=============================================")
         
         self("=================== DATA ====================")
