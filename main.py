@@ -56,7 +56,7 @@ def main():
     if args.mode == 'train' and (not os.path.exists(extended_pickle_path) or os.path.getsize(extended_pickle_path) == 0):
         print("Creating extended dataset for pre-training (Stage 1)...")
         # For each class, create 20x more data with the same distribution
-        X_train_extended, y_train_extended = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, 
+        X_train_extended, y_train_extended = extend_balancing_classes(X_train, y_train, aug_intensity=0.3, 
                                                                       counts=np.array([np.sum(y_train == c) for c in range(43)]) * 20)
         
         print("Saving extended dataset to disk...")
@@ -67,7 +67,7 @@ def main():
     balanced_pickle_path = 'data/train_balanced.p'
     if args.mode == 'train' and (not os.path.exists(balanced_pickle_path) or os.path.getsize(balanced_pickle_path) == 0):
         print("Creating balanced dataset for fine-tuning (Stage 2)...")
-        X_train_balanced, y_train_balanced = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, 
+        X_train_balanced, y_train_balanced = extend_balancing_classes(X_train, y_train, aug_intensity=0.3, 
                                                                      counts=np.full(43, 20000, dtype=int))
         
         print("Saving balanced dataset to disk...")

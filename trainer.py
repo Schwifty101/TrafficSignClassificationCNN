@@ -3,11 +3,9 @@ import tensorflow as tf
 import numpy as np
 import time
 import matplotlib.pyplot as plt
-from model_builder import Parameters, model_pass, get_time_hhmmss, print_progress, TrafficSignModel
-from data_loader import load_pickled_data
-import json
 import os
 import smtplib
+from model_builder import Parameters, get_time_hhmmss, TrafficSignModel
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
@@ -36,23 +34,17 @@ print(f"CPU threading configured with {cpu_count} threads")
 # Configure GPU memory growth to avoid OOM errors
 if gpus:
     try:
-        # Enable memory growth on all GPUs
+        # Enable memory growth on all GPUs - preferred approach in TF 2.x
+        # This allows TensorFlow to allocate only as much GPU memory as needed
+        # rather than claiming all GPU memory at once
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
+            
+        # Note: The memory limit approach using LogicalDeviceConfiguration is
+        # available but can be tricky without knowing total GPU memory.
+        # We'll rely on memory growth which is the recommended approach.
         
-        # Configure memory limits for GPUs if needed
-        # In TF 2.x, we use tf.config instead of the old session approach
-        for i, gpu in enumerate(gpus):
-            memory_limit = int(0.85 * 1024 * 1024 * 1024)  # 85% of total memory in bytes
-            try:
-                tf.config.set_logical_device_configuration(
-                    gpu,
-                    [tf.config.LogicalDeviceConfiguration(memory_limit=memory_limit)]
-                )
-            except Exception as e:
-                print(f"Could not set memory limit for GPU {i}: {e}")
-        
-        print(f"Found {len(gpus)} GPU(s), memory growth enabled, using 85% memory fraction")
+        print(f"Found {len(gpus)} GPU(s), memory growth enabled")
     except RuntimeError as e:
         print(f"GPU configuration error: {e}")
 else:
