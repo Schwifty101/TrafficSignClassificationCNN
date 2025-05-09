@@ -56,6 +56,7 @@ class TrafficSignModel(tf.keras.Model):
             padding='same',
             activation='relu'
         )
+        self.bn1 = tf.keras.layers.BatchNormalization()
         self.pool1 = tf.keras.layers.MaxPool2D(pool_size=2, strides=2, padding='same')
         self.dropout1 = tf.keras.layers.Dropout(rate=1-params.conv1_p)
         
@@ -65,6 +66,7 @@ class TrafficSignModel(tf.keras.Model):
             padding='same',
             activation='relu'
         )
+        self.bn2 = tf.keras.layers.BatchNormalization()
         self.pool2 = tf.keras.layers.MaxPool2D(pool_size=2, strides=2, padding='same')
         self.dropout2 = tf.keras.layers.Dropout(rate=1-params.conv2_p)
         
@@ -74,6 +76,7 @@ class TrafficSignModel(tf.keras.Model):
             padding='same',
             activation='relu'
         )
+        self.bn3 = tf.keras.layers.BatchNormalization()
         self.pool3 = tf.keras.layers.MaxPool2D(pool_size=2, strides=2, padding='same')
         self.dropout3 = tf.keras.layers.Dropout(rate=1-params.conv3_p)
         
@@ -86,6 +89,7 @@ class TrafficSignModel(tf.keras.Model):
     def call(self, inputs, training=False):
         # First convolutional block
         x = self.conv1(inputs)
+        x = self.bn1(x, training=training)
         x = self.pool1(x)
         if training:
             x = self.dropout1(x)
@@ -93,6 +97,7 @@ class TrafficSignModel(tf.keras.Model):
         
         # Second convolutional block
         x = self.conv2(x)
+        x = self.bn2(x, training=training)
         x = self.pool2(x)
         if training:
             x = self.dropout2(x)
@@ -100,6 +105,7 @@ class TrafficSignModel(tf.keras.Model):
         
         # Third convolutional block
         x = self.conv3(x)
+        x = self.bn3(x, training=training)
         x = self.pool3(x)
         if training:
             x = self.dropout3(x)

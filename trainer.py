@@ -165,8 +165,8 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
     if params.learning_rate_decay:
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
             initial_learning_rate=params.learning_rate,
-            decay_steps=params.max_epochs,
-            decay_rate=0.01
+            decay_steps=params.max_epochs // 2,  # Decay over half the total epochs
+            decay_rate=0.1  # Slower decay - only reduce to 10% of initial rate
         )
         learning_rate = lr_schedule
     else:

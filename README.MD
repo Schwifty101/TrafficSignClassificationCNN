@@ -68,7 +68,7 @@ pip install -r requirements.txt
 To train the model with default parameters:
 
 ```bash
-main
+python main.py --mode train   
 ```
 
 The training process will:
