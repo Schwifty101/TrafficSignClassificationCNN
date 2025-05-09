@@ -198,7 +198,7 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
             
         predictions = []
         losses = []
-        batch_size = 128
+        batch_size = 256  # Adjust batch size as needed
         
         # Add progress tracking for large datasets
         num_batches = (len(X) + batch_size - 1) // batch_size

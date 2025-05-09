@@ -87,7 +87,7 @@ def main():
             max_epochs=400,
             log_epoch=1,
             print_epoch=1,
-            learning_rate_decay=True,
+            learning_rate_decay=False,
             learning_rate=0.0001,
             l2_reg_enabled=True,
             l2_lambda=0.0001,
