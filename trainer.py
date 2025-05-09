@@ -163,10 +163,15 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
     
     # Learning rate schedule if enabled
     if params.learning_rate_decay:
+        # For stage 1 (pre-training with lr=0.001), use moderate decay
+        # For stage 2 (fine-tuning with lr=0.0001), use slower decay
+        is_pretraining = params.learning_rate >= 0.001
+        
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
             initial_learning_rate=params.learning_rate,
-            decay_steps=params.max_epochs // 2,  # Decay over half the total epochs
-            decay_rate=0.1  # Slower decay - only reduce to 10% of initial rate
+            decay_steps=params.max_epochs // (2 if is_pretraining else 4),  # Faster decay for pre-training
+            decay_rate=0.1 if is_pretraining else 0.5,  # Moderate decay for pre-training, slower for fine-tuning
+            staircase=False  # Smooth decay instead of steps
         )
         learning_rate = lr_schedule
     else:

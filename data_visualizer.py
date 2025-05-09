@@ -153,18 +153,39 @@ def visualize_preprocessed_vs_original(file_path, indices=None, num_samples=5):
         axes[i, 0].axis('off')
         
         # Preprocessed image (simulated by applying equalization)
-        from skimage import exposure
+        from skimage import exposure, util
         if len(img.shape) == 3 and img.shape[2] == 1:
             # Grayscale image with channel
-            preprocessed = exposure.equalize_adapthist(img.reshape(img.shape[0], img.shape[1]))
+            # Ensure image is in proper range before equalization
+            img_norm = img.reshape(img.shape[0], img.shape[1])
+            if img_norm.dtype == np.float32 or img_norm.dtype == np.float64:
+                if img_norm.max() > 1.0:
+                    img_norm = img_norm / 255.0  # Normalize to [0,1]
+            preprocessed = exposure.equalize_adapthist(img_norm)
             axes[i, 1].imshow(preprocessed, cmap='gray')
         elif len(img.shape) == 2:
             # Grayscale image without channel
-            preprocessed = exposure.equalize_adapthist(img)
+            # Ensure image is in proper range before equalization
+            if img.dtype == np.float32 or img.dtype == np.float64:
+                if img.max() > 1.0:
+                    img_norm = img / 255.0  # Normalize to [0,1]
+                else:
+                    img_norm = img.copy()
+            else:
+                img_norm = img / 255.0
+            preprocessed = exposure.equalize_adapthist(img_norm)
             axes[i, 1].imshow(preprocessed, cmap='gray')
         else:
             # Color image - convert to grayscale then equalize
-            gray = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
+            # Ensure image is in proper range before conversion
+            if img.dtype == np.float32 or img.dtype == np.float64:
+                if img.max() > 1.0:
+                    img_norm = img / 255.0  # Normalize to [0,1]
+                else:
+                    img_norm = img.copy()
+            else:
+                img_norm = img / 255.0
+            gray = 0.299 * img_norm[:, :, 0] + 0.587 * img_norm[:, :, 1] + 0.114 * img_norm[:, :, 2]
             preprocessed = exposure.equalize_adapthist(gray)
             axes[i, 1].imshow(preprocessed, cmap='gray')
         
@@ -204,11 +225,18 @@ def visualize_augmented_samples(X, y, aug_intensity=0.75, num_samples=5):
         # We need just one batch for visualization
         break
     
-    # Normalize if needed
-    if X_samples.max() > 1:
-        X_samples = X_samples / 255.0
-    if x_augmented.max() > 1:
-        x_augmented = x_augmented / 255.0
+    # Debug information
+    print(f"Original images - Min: {X_samples.min():.4f}, Max: {X_samples.max():.4f}, Shape: {X_samples.shape}, dtype: {X_samples.dtype}")
+    print(f"Augmented images - Min: {x_augmented.min():.4f}, Max: {x_augmented.max():.4f}, Shape: {x_augmented.shape}, dtype: {x_augmented.dtype}")
+    
+    # Normalize for visualization if needed
+    X_display = X_samples.copy()
+    x_augmented_display = x_augmented.copy()
+    
+    if X_display.max() > 1:
+        X_display = X_display / 255.0
+    if x_augmented_display.max() > 1:
+        x_augmented_display = x_augmented_display / 255.0
     
     # Create figure
     fig, axes = plt.subplots(len(indices), 2, figsize=(8, 2*len(indices)))
@@ -218,29 +246,29 @@ def visualize_augmented_samples(X, y, aug_intensity=0.75, num_samples=5):
     # For each sample
     for i in range(len(indices)):
         # Original image
-        if len(X_samples[i].shape) == 3 and X_samples[i].shape[2] == 1:
+        if len(X_display[i].shape) == 3 and X_display[i].shape[2] == 1:
             # Grayscale image with channel
-            axes[i, 0].imshow(X_samples[i].reshape(X_samples[i].shape[0], X_samples[i].shape[1]), cmap='gray')
-        elif len(X_samples[i].shape) == 2:
+            axes[i, 0].imshow(X_display[i].reshape(X_display[i].shape[0], X_display[i].shape[1]), cmap='gray')
+        elif len(X_display[i].shape) == 2:
             # Grayscale image without channel
-            axes[i, 0].imshow(X_samples[i], cmap='gray')
+            axes[i, 0].imshow(X_display[i], cmap='gray')
         else:
             # Color image
-            axes[i, 0].imshow(X_samples[i])
+            axes[i, 0].imshow(X_display[i])
         
         axes[i, 0].set_title(f"Original (Class {y_samples[i]})")
         axes[i, 0].axis('off')
         
         # Augmented image
-        if len(x_augmented[i].shape) == 3 and x_augmented[i].shape[2] == 1:
+        if len(x_augmented_display[i].shape) == 3 and x_augmented_display[i].shape[2] == 1:
             # Grayscale image with channel
-            axes[i, 1].imshow(x_augmented[i].reshape(x_augmented[i].shape[0], x_augmented[i].shape[1]), cmap='gray')
-        elif len(x_augmented[i].shape) == 2:
+            axes[i, 1].imshow(x_augmented_display[i].reshape(x_augmented_display[i].shape[0], x_augmented_display[i].shape[1]), cmap='gray')
+        elif len(x_augmented_display[i].shape) == 2:
             # Grayscale image without channel
-            axes[i, 1].imshow(x_augmented[i], cmap='gray')
+            axes[i, 1].imshow(x_augmented_display[i], cmap='gray')
         else:
             # Color image
-            axes[i, 1].imshow(x_augmented[i])
+            axes[i, 1].imshow(x_augmented_display[i])
         
         axes[i, 1].set_title(f"Augmented (Class {y_samples[i]})")
         axes[i, 1].axis('off')

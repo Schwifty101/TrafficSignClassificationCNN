@@ -51,57 +51,98 @@ def main():
     X_train, y_train = preprocess_dataset(X_train, y_train)
     X_test, y_test = preprocess_dataset(X_test, y_test)
     
-    # Only create balanced dataset if needed and doesn't exist already
+    # Create extended dataset for pre-training (20x larger than original with original distribution)
+    extended_pickle_path = 'data/train_extended.p'
+    if args.mode == 'train' and (not os.path.exists(extended_pickle_path) or os.path.getsize(extended_pickle_path) == 0):
+        print("Creating extended dataset for pre-training (Stage 1)...")
+        # For each class, create 20x more data with the same distribution
+        X_train_extended, y_train_extended = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, 
+                                                                      counts=np.array([np.sum(y_train == c) for c in range(43)]) * 20)
+        
+        print("Saving extended dataset to disk...")
+        with open(extended_pickle_path, 'wb') as f:
+            pickle.dump({'features': X_train_extended, 'labels': y_train_extended}, f)
+    
+    # Create balanced dataset for fine-tuning (20k examples per class)
     balanced_pickle_path = 'data/train_balanced.p'
     if args.mode == 'train' and (not os.path.exists(balanced_pickle_path) or os.path.getsize(balanced_pickle_path) == 0):
-        print("Creating balanced dataset...")
-        X_train_balanced, y_train_balanced = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, counts=np.full(43, 20000, dtype=int))
+        print("Creating balanced dataset for fine-tuning (Stage 2)...")
+        X_train_balanced, y_train_balanced = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, 
+                                                                     counts=np.full(43, 20000, dtype=int))
         
         print("Saving balanced dataset to disk...")
         with open(balanced_pickle_path, 'wb') as f:
             pickle.dump({'features': X_train_balanced, 'labels': y_train_balanced}, f)
     
-    # Only create extended dataset for visualization if explicitly requested
+    # Only create additional dataset for visualization if explicitly requested
     if args.create_visualization:
-        extended_pickle_path = 'data/train_extended.p'
-        if not os.path.exists(extended_pickle_path) or os.path.getsize(extended_pickle_path) == 0:
-            print("Creating extended dataset for class distribution visualization...")
-            X_train_extended, y_train_extended = extend_balancing_classes(X_train, y_train, aug_intensity=0.75, counts=np.array([np.sum(y_train == c) for c in range(43)]) * 20)
-            
-            print("Saving extended dataset to disk...")
-            with open(extended_pickle_path, 'wb') as f:
-                pickle.dump({'features': X_train_extended, 'labels': y_train_extended}, f)
+        # This dataset is already created by default, so just inform the user
+        print("Extended dataset ready for visualization at:", extended_pickle_path)
     
     if args.mode == 'train':
         print("Training mode selected.")
-        print("Loading balanced dataset from disk...")
-        X_train_balanced, y_train_balanced = load_pickled_data('data/train_balanced.p', ['features', 'labels'])
-        print("Splitting data into training and validation sets...")
-        X_train, X_valid, y_train, y_valid = train_test_split(X_train_balanced, y_train_balanced, test_size=0.25)
         
-        print("Setting model parameters...")
-        parameters = Parameters(
+        # Stage 1: Pre-training with extended dataset
+        print("Stage 1: Pre-training with extended dataset (higher learning rate)...")
+        print("Loading extended dataset from disk...")
+        X_train_extended, y_train_extended = load_pickled_data('data/train_extended.p', ['features', 'labels'])
+        print("Splitting extended data into training and validation sets...")
+        X_train_ext, X_valid_ext, y_train_ext, y_valid_ext = train_test_split(X_train_extended, y_train_extended, test_size=0.25)
+        
+        print("Setting parameters for Stage 1 (pre-training)...")
+        pretrain_parameters = Parameters(
             num_classes=43,
             image_size=(32, 32),
             batch_size=256,
-            max_epochs=200,
+            max_epochs=200,  # Max number of epochs for pre-training
             log_epoch=1,
             print_epoch=1,
             learning_rate_decay=False,  # Enable learning rate decay
-            learning_rate=0.001,  # Increased from 0.0001 to 0.001 (10x higher)
+            learning_rate=0.001,  # Higher learning rate for pre-training
             l2_reg_enabled=True,
             l2_lambda=0.0001,
             early_stopping_enabled=True,
-            early_stopping_patience=100,
-            resume_training=False,  # Start fresh training
+            early_stopping_patience=20,  # Stop earlier if no improvement
+            resume_training=False,  # Start fresh pre-training
             conv1_k=5, conv1_d=32, conv1_p=0.9,
             conv2_k=5, conv2_d=64, conv2_p=0.8,
             conv3_k=5, conv3_d=128, conv3_p=0.7,
             fc4_size=1024, fc4_p=0.5
         )
         
-        print("Starting model training...")
-        train_model(parameters, X_train, y_train, X_valid, y_valid, X_test, y_test, config["logger_config"])
+        print("Starting Stage 1: Pre-training...")
+        train_model(pretrain_parameters, X_train_ext, y_train_ext, X_valid_ext, y_valid_ext, X_test, y_test, config["logger_config"])
+        
+        # Stage 2: Fine-tuning with balanced dataset
+        print("\n\nStage 2: Fine-tuning with balanced dataset (lower learning rate)...")
+        print("Loading balanced dataset from disk...")
+        X_train_balanced, y_train_balanced = load_pickled_data('data/train_balanced.p', ['features', 'labels'])
+        print("Splitting balanced data into training and validation sets...")
+        X_train, X_valid, y_train, y_valid = train_test_split(X_train_balanced, y_train_balanced, test_size=0.25)
+        
+        print("Setting parameters for Stage 2 (fine-tuning)...")
+        finetune_parameters = Parameters(
+            num_classes=43,
+            image_size=(32, 32),
+            batch_size=256,
+            max_epochs=100,  # Max number of epochs for fine-tuning
+            log_epoch=1,
+            print_epoch=1,
+            learning_rate_decay=True,  # Enable learning rate decay
+            learning_rate=0.0001,  # Lower learning rate for fine-tuning
+            l2_reg_enabled=True,
+            l2_lambda=0.0001,
+            early_stopping_enabled=True,
+            early_stopping_patience=50,  # More patience for fine-tuning
+            resume_training=True,  # Continue from pre-trained model
+            conv1_k=5, conv1_d=32, conv1_p=0.9,
+            conv2_k=5, conv2_d=64, conv2_p=0.8,
+            conv3_k=5, conv3_d=128, conv3_p=0.7,
+            fc4_size=1024, fc4_p=0.5
+        )
+        
+        print("Starting Stage 2: Fine-tuning...")
+        train_model(finetune_parameters, X_train, y_train, X_valid, y_valid, X_test, y_test, config["logger_config"])
     
     elif args.mode == 'evaluate':
         print("Evaluation mode selected.")
@@ -111,16 +152,16 @@ def main():
             num_classes=43,
             image_size=(32, 32),
             batch_size=256,
-            max_epochs=400,
+            max_epochs=200,
             log_epoch=1,
             print_epoch=1,
-            learning_rate_decay=False,
-            learning_rate=0.0001,
+            learning_rate_decay=True,
+            learning_rate=0.0001,  # Use fine-tuning learning rate
             l2_reg_enabled=True,
             l2_lambda=0.0001,
             early_stopping_enabled=True,
-            early_stopping_patience=100,
-            resume_training=True,
+            early_stopping_patience=50,
+            resume_training=True,  # Load the trained model
             conv1_k=5, conv1_d=32, conv1_p=0.9,
             conv2_k=5, conv2_d=64, conv2_p=0.8,
             conv3_k=5, conv3_d=128, conv3_p=0.7,
@@ -141,16 +182,16 @@ def main():
             num_classes=43,
             image_size=(32, 32),
             batch_size=256,
-            max_epochs=400,
+            max_epochs=100,
             log_epoch=1,
             print_epoch=1,
-            learning_rate_decay=False,
-            learning_rate=0.001,
+            learning_rate_decay=True,
+            learning_rate=0.0001,  # Use fine-tuning learning rate
             l2_reg_enabled=True,
             l2_lambda=0.0001,
             early_stopping_enabled=True,
-            early_stopping_patience=100,
-            resume_training=False,
+            early_stopping_patience=50,
+            resume_training=True,  # Load the trained model
             conv1_k=5, conv1_d=32, conv1_p=0.9,
             conv2_k=5, conv2_d=64, conv2_p=0.8,
             conv3_k=5, conv3_d=128, conv3_p=0.7,
