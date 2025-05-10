@@ -1,4 +1,16 @@
 # model_builder.py
+# This file defines the model architecture for the Traffic Sign Classification CNN.
+# The architecture consists of:
+#   - 3 Convolutional layers with ReLU activation
+#   - 3 Max pooling layers
+#   - Dropout after each pooling layer
+#   - 1 Fully connected layer with ReLU activation
+#   - 1 Output layer with softmax activation (implicit in the loss function)
+#
+# Note: The model architecture is designed to be consistent with the Keras implementation
+# used in trainer.py and evaluator.py. Previously, this file contained a more complex architecture
+# with multi-scale feature concatenation, but that has been replaced for consistency.
+
 import tensorflow as tf
 from collections import namedtuple
 import time
@@ -25,6 +37,7 @@ Parameters = namedtuple('Parameters', [
 
 # ======== Utility Functions ========
 def get_time_hhmmss(start = None):
+    # Returns formatted timestamp or elapsed time if start is provided
     if start is None:
         return time.strftime("%Y/%m/%d %H:%M:%S")
     end = time.time()
@@ -34,6 +47,7 @@ def get_time_hhmmss(start = None):
     return time_str
 
 def print_progress(iteration, total):
+    # Prints progress bar to console
     str_format = "{0:.0f}"
     percents = str_format.format(100 * (iteration / float(total)))
     filled_length = int(round(100 * iteration / float(total)))
@@ -43,113 +57,111 @@ def print_progress(iteration, total):
         sys.stdout.write('\n')
     sys.stdout.flush()
 
-# Create a proper Keras model for TensorFlow 2.x
-class TrafficSignModel(tf.keras.Model):
-    def __init__(self, params):
-        super(TrafficSignModel, self).__init__()
-        self.params = params
-        
-        # Convolutional layers
-        self.conv1 = tf.keras.layers.Conv2D(
-            filters=params.conv1_d,
-            kernel_size=params.conv1_k,
-            padding='same',
-            activation='relu'
-        )
-        self.bn1 = tf.keras.layers.BatchNormalization()
-        self.pool1 = tf.keras.layers.MaxPool2D(pool_size=2, strides=2, padding='same')
-        self.dropout1 = tf.keras.layers.Dropout(rate=1-params.conv1_p)
-        
-        self.conv2 = tf.keras.layers.Conv2D(
-            filters=params.conv2_d,
-            kernel_size=params.conv2_k,
-            padding='same',
-            activation='relu'
-        )
-        self.bn2 = tf.keras.layers.BatchNormalization()
-        self.pool2 = tf.keras.layers.MaxPool2D(pool_size=2, strides=2, padding='same')
-        self.dropout2 = tf.keras.layers.Dropout(rate=1-params.conv2_p)
-        
-        self.conv3 = tf.keras.layers.Conv2D(
-            filters=params.conv3_d,
-            kernel_size=params.conv3_k,
-            padding='same',
-            activation='relu'
-        )
-        self.bn3 = tf.keras.layers.BatchNormalization()
-        self.pool3 = tf.keras.layers.MaxPool2D(pool_size=2, strides=2, padding='same')
-        self.dropout3 = tf.keras.layers.Dropout(rate=1-params.conv3_p)
-        
-        # Fully connected layers
-        self.flatten = tf.keras.layers.Flatten()
-        self.fc4 = tf.keras.layers.Dense(params.fc4_size, activation='relu')
-        self.dropout4 = tf.keras.layers.Dropout(rate=1-params.fc4_p)
-        self.output_layer = tf.keras.layers.Dense(params.num_classes)
-        
-    def call(self, inputs, training=False):
-        # First convolutional block
-        x = self.conv1(inputs)
-        x = self.bn1(x, training=training)
-        x = self.pool1(x)
-        if training:
-            x = self.dropout1(x)
-        x1 = tf.keras.layers.MaxPool2D(pool_size=4, strides=4, padding='same')(x)
-        
-        # Second convolutional block
-        x = self.conv2(x)
-        x = self.bn2(x, training=training)
-        x = self.pool2(x)
-        if training:
-            x = self.dropout2(x)
-        x2 = tf.keras.layers.MaxPool2D(pool_size=2, strides=2, padding='same')(x)
-        
-        # Third convolutional block
-        x = self.conv3(x)
-        x = self.bn3(x, training=training)
-        x = self.pool3(x)
-        if training:
-            x = self.dropout3(x)
-        x3 = x
-        
-        # Flatten and concatenate multi-scale features
-        x1 = self.flatten(x1)
-        x2 = self.flatten(x2)
-        x3 = self.flatten(x3)
-        
-        x = tf.concat([x1, x2, x3], axis=1)
-        
-        # Fully connected layers
-        x = self.fc4(x)
-        if training:
-            x = self.dropout4(x)
-        
-        # Output layer
-        return self.output_layer(x)
-
-# Keep these functions for backward compatibility
+# ======== Model Components ========
 def fully_connected(input, size):
-    return tf.keras.layers.Dense(size)(input)
+    # Creates a fully connected layer with Xavier initialization
+    initializer = tf.keras.initializers.GlorotUniform()  # TF2.x Xavier/Glorot initializer
+    weights = tf.Variable(
+        initializer(shape=[input.get_shape()[1], size]),
+        name='weights'
+    )
+    biases = tf.Variable(
+        tf.zeros([size]),
+        name='biases'
+    )
+    return tf.matmul(input, weights) + biases
 
 def fully_connected_relu(input, size):
-    return tf.keras.layers.Dense(size, activation='relu')(input)
+    # Creates a fully connected layer with ReLU activation
+    return tf.nn.relu(fully_connected(input, size))
 
 def conv_relu(input, kernel_size, depth):
-    return tf.keras.layers.Conv2D(
-        filters=depth,
-        kernel_size=kernel_size,
-        padding='same',
-        activation='relu'
-    )(input)
+    # Creates a convolutional layer with ReLU activation
+    input_depth = input.get_shape()[3]
+    initializer = tf.keras.initializers.GlorotUniform()  # TF2.x Xavier/Glorot initializer
+    weights = tf.Variable(
+        initializer(shape=[kernel_size, kernel_size, input_depth, depth]),
+        name='weights'
+    )
+    biases = tf.Variable(
+        tf.zeros([depth]),
+        name='biases'
+    )
+    conv = tf.nn.conv2d(input, weights, strides=[1, 1, 1, 1], padding='SAME')
+    return tf.nn.relu(conv + biases)
 
 def pool(input, size):
-    return tf.keras.layers.MaxPool2D(
-        pool_size=size,
-        strides=size,
-        padding='same'
-    )(input)
+    # Creates a max pooling layer
+    return tf.nn.max_pool(
+        input,
+        ksize=[1, size, size, 1],
+        strides=[1, size, size, 1],
+        padding='SAME'
+    )
 
-# This function is kept for backward compatibility with existing code
 def model_pass(input, params, is_training):
-    # Create a proper TrafficSignModel and call it
-    model = TrafficSignModel(params)
-    return model(input, training=is_training)
+    """
+    Creates a model architecture consistent with the Keras implementation used in trainer.py and evaluator.py.
+    This ensures architectural consistency across all components of the system.
+    
+    Args:
+        input: Input tensor
+        params: Model parameters
+        is_training: Boolean indicating if this is a training pass
+        
+    Returns:
+        Output logits tensor
+    """
+    # Remove debug prints that can cause issues in graph mode
+    # tf.print("Input shape:", tf.shape(input), output_stream=sys.stdout)
+    
+    # Handle is_training as either a Python bool or a TF tensor
+    # If it's a tensor, this will safely use it in graph mode
+    # If it's a Python bool, it will just use the value directly
+    def maybe_dropout(x, keep_rate):
+        if isinstance(is_training, bool):
+            # Python bool case
+            if is_training:
+                return tf.nn.dropout(x, rate=1-keep_rate)
+            return x
+        else:
+            # TF tensor case
+            return tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(x, rate=1-keep_rate),
+                lambda: x
+            )
+    
+    with tf.name_scope('conv1'):
+        conv1 = conv_relu(input, kernel_size=params.conv1_k, depth=params.conv1_d)
+    
+    with tf.name_scope('pool1'):
+        pool1 = pool(conv1, size=2)
+        pool1 = maybe_dropout(pool1, params.conv1_p)
+    
+    with tf.name_scope('conv2'):
+        conv2 = conv_relu(pool1, kernel_size=params.conv2_k, depth=params.conv2_d)
+    
+    with tf.name_scope('pool2'):
+        pool2 = pool(conv2, size=2)
+        pool2 = maybe_dropout(pool2, params.conv2_p)
+    
+    with tf.name_scope('conv3'):
+        conv3 = conv_relu(pool2, kernel_size=params.conv3_k, depth=params.conv3_d)
+    
+    with tf.name_scope('pool3'):
+        pool3 = pool(conv3, size=2)
+        pool3 = maybe_dropout(pool3, params.conv3_p)
+    
+    # Flatten layer (simplified to match Keras implementation)
+    shape = pool3.get_shape().as_list()
+    flattened = tf.reshape(pool3, [-1, shape[1] * shape[2] * shape[3]])
+    
+    with tf.name_scope('fc4'):
+        fc4 = fully_connected_relu(flattened, size=params.fc4_size)
+        fc4 = maybe_dropout(fc4, params.fc4_p)
+    
+    with tf.name_scope('out'):
+        logits = fully_connected(fc4, size=params.num_classes)
+    
+    return logits

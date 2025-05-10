@@ -3,86 +3,82 @@ import tensorflow as tf
 import numpy as np
 import time
 import matplotlib.pyplot as plt
+from model_builder import Parameters, model_pass, get_time_hhmmss, print_progress
+from data_loader import load_pickled_data
 import os
-import smtplib
-from model_builder import Parameters, get_time_hhmmss, TrafficSignModel
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.image import MIMEImage
+import sys
 
-# Use TF2.x compatibility
-print("Using TensorFlow version:", tf.__version__)
-
-# Configure TensorFlow to use both CPU and GPU efficiently
-gpus = tf.config.list_physical_devices('GPU')
-cpus = tf.config.list_physical_devices('CPU')
-
-# Set TensorFlow to use mixed precision for better GPU performance
-try:
-    policy = tf.keras.mixed_precision.Policy('mixed_float16')
-    tf.keras.mixed_precision.set_global_policy(policy)
-    print("Mixed precision policy set to mixed_float16")
-except Exception as e:
-    print(f"Could not set mixed precision policy: {e}")
-
-# Configure inter/intra parallelism for better CPU utilization
-cpu_count = os.cpu_count() or 4
-tf.config.threading.set_inter_op_parallelism_threads(cpu_count)  # Number of CPU cores for parallel operations
-tf.config.threading.set_intra_op_parallelism_threads(cpu_count)  # Number of CPU threads per operation
-print(f"CPU threading configured with {cpu_count} threads")
-
-# Configure GPU memory growth to avoid OOM errors
-if gpus:
-    try:
-        # Enable memory growth on all GPUs - preferred approach in TF 2.x
-        # This allows TensorFlow to allocate only as much GPU memory as needed
-        # rather than claiming all GPU memory at once
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-            
-        # Note: The memory limit approach using LogicalDeviceConfiguration is
-        # available but can be tricky without knowing total GPU memory.
-        # We'll rely on memory growth which is the recommended approach.
-        
-        print(f"Found {len(gpus)} GPU(s), memory growth enabled")
-    except RuntimeError as e:
-        print(f"GPU configuration error: {e}")
-else:
-    print("No GPUs found, running on CPU only")
-
+# TF2.x compatible EarlyStopping class (for models not using Keras)
 class EarlyStopping:
-    def __init__(self, checkpoint, patience=100, minimize=True):
+    """
+    Early stopping handler for TensorFlow 2.x. 
+    In most cases, you should use tf.keras.callbacks.EarlyStopping instead.
+    This class is kept for compatibility with non-Keras TF2.x code.
+    
+    Args:
+        model: The TensorFlow model to checkpoint/restore
+        checkpoint_path: Path to save model checkpoints
+        patience: Number of epochs to wait for improvement before stopping
+        minimize: Whether to minimize (True) or maximize (False) the monitored value
+    """
+    def __init__(self, model=None, checkpoint_path=None, patience=100, minimize=True):
         self.minimize = minimize
         self.patience = patience
-        self.checkpoint = checkpoint
+        self.model = model  # TF2.x model
+        self.checkpoint_path = checkpoint_path or os.path.join(os.getcwd(), "early_stopping_checkpoint.h5")
         self.best_monitored_value = np.inf if minimize else 0.
         self.best_monitored_epoch = 0
-
+        self.best_weights = None
+    
     def __call__(self, value, epoch):
+        improved = False
         if (self.minimize and value < self.best_monitored_value) or (not self.minimize and value > self.best_monitored_value):
             self.best_monitored_value = value
             self.best_monitored_epoch = epoch
-            self.checkpoint.save()
-        elif self.best_monitored_epoch + self.patience < epoch:
-            self.checkpoint.restore()
+            improved = True
+            
+            # Save best weights
+            if self.model is not None:
+                self.best_weights = self.model.get_weights()
+                if self.checkpoint_path:
+                    self.model.save_weights(self.checkpoint_path)
+                    print(f"Saved checkpoint at epoch {epoch+1}")
+                    
+        if self.best_monitored_epoch + self.patience < epoch:
+            # Restore best weights if possible
+            if self.model is not None and self.best_weights is not None:
+                self.model.set_weights(self.best_weights)
+                print(f"Early stopping triggered, restored weights from epoch {self.best_monitored_epoch+1}")
+            elif self.model is not None and self.checkpoint_path and os.path.exists(self.checkpoint_path):
+                self.model.load_weights(self.checkpoint_path)
+                print(f"Early stopping triggered, restored weights from checkpoint")
+            else:
+                print("WARNING: Early stopping triggered but couldn't restore best weights")
             return True
         return False
 
-class ModelCloudLog:
-    def __init__(self, log_dir, email_config=None):
-        self.log_dir = log_dir
-        self.email_config = email_config
-        os.makedirs(log_dir, exist_ok=True)
-        self.log_file = open(os.path.join(log_dir, "training.log"), "a")
-
+class ModelLogger:
+    def __init__(self, log_path):
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        self.log_file = open(log_path, 'a')
+        
     def __call__(self, message):
         self.log_file.write(message + "\n")
         self.log_file.flush()
         print(message)
+    
+    def sync(self, notify=False, message=None):
+        self.log_file.flush()
+        if notify and message:
+            print(f"Notification: {message}")
+    
+    def add_plot(self, notify=False, caption=None):
+        if notify and caption:
+            print(f"Added plot: {caption}")
 
     def log_parameters(self, params, train_size, valid_size, test_size):
         self("=============================================")
-        self("=============== TRAINING DATA ===============")
+        self("============= RESUMING TRAINING =============")
         self("=============================================")
         
         self("=================== DATA ====================")
@@ -103,484 +99,309 @@ class ModelCloudLog:
         self(f" L2 Regularization: {'Enabled (lambda = {params.l2_lambda})' if params.l2_reg_enabled else 'Disabled'}")
         self(f" Early stopping: {'Enabled (patience = {params.early_stopping_patience})' if params.early_stopping_enabled else 'Disabled'}")
         self(f" Keep training old model: {'Enabled' if params.resume_training else 'Disabled'}")
-        
-    def sync(self, notify=False, message=None):
-        """Synchronize logs and optionally send email notification"""
-        if notify and self.email_config and message:
-            self.send_email_notification(message)
-            
-    def send_email_notification(self, message, image_path=None):
-        """Send email notification with optional plot image attachment"""
-        if not self.email_config:
-            print("Email configuration not provided, skipping notification")
-            return
-            
-        try:
-            smtp_server = self.email_config.get("smtp_server")
-            smtp_port = self.email_config.get("smtp_port", 587)
-            sender_email = self.email_config.get("sender_email")
-            receiver_email = self.email_config.get("receiver_email")
-            password = self.email_config.get("password")
-            
-            if not all([smtp_server, sender_email, receiver_email, password]):
-                print("Missing email configuration parameters, skipping notification")
-                return
-                
-            msg = MIMEMultipart()
-            msg['Subject'] = 'Traffic Sign Classification CNN Training Update'
-            msg['From'] = sender_email
-            msg['To'] = receiver_email
-            
-            # Add message body
-            msg.attach(MIMEText(message))
-            
-            # Add image if provided
-            if image_path and os.path.exists(image_path):
-                with open(image_path, 'rb') as img_file:
-                    img = MIMEImage(img_file.read())
-                    img.add_header('Content-Disposition', 'attachment', filename=os.path.basename(image_path))
-                    msg.attach(img)
-            
-            # Send email
-            with smtplib.SMTP(smtp_server, smtp_port) as server:
-                server.starttls()
-                server.login(sender_email, password)
-                server.send_message(msg)
-                print(f"Email notification sent to {receiver_email}")
-                
-        except Exception as e:
-            print(f"Failed to send email notification: {e}")
-            
-    def add_plot(self, notify=False, caption=None):
-        """Add plot to the log and optionally send as an email"""
-        learning_curves_path = os.path.join(self.log_dir, "learning_curves.png")
-        plt.savefig(learning_curves_path)
-        
-        if notify and caption and self.email_config:
-            self.send_email_notification(f"Training update: {caption}", learning_curves_path)
 
-def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logger_config):
-    # Record start time for overall timing
-    training_start_time = time.time()
-    
-    # Convert input data to float32 if needed
-    if X_train.dtype != np.float32:
-        print(f"Converting input data from {X_train.dtype} to float32")
-        X_train = X_train.astype(np.float32)
-        X_valid = X_valid.astype(np.float32)
-        X_test = X_test.astype(np.float32)
-    
-    # Normalize the data to [0, 1] range if not already
-    if X_train.max() > 1.0:
-        print("Normalizing data to [0, 1] range")
-        X_train /= 255.0
-        X_valid /= 255.0
-        X_test /= 255.0
-    
-    # Create efficient data pipelines using tf.data
-    print("Creating optimized data pipelines for CPU/GPU coordination...")
-    
-    # Get the number of CPU cores for parallel processing
-    cpu_count = os.cpu_count() or 4  # Fallback to 4 if detection fails
-    
-    # Calculate buffer sizes based on available memory and dataset size
-    shuffle_buffer = min(len(X_train), 10000)  # Limit buffer size for large datasets
-    prefetch_buffer = tf.data.AUTOTUNE  # Let TensorFlow optimize prefetch size
-    
-    # Create training dataset with prefetching and parallel processing
-    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-    train_dataset = train_dataset.cache()  # Cache the dataset in memory
-    train_dataset = train_dataset.shuffle(buffer_size=shuffle_buffer)
-    train_dataset = train_dataset.batch(params.batch_size)
-    train_dataset = train_dataset.prefetch(prefetch_buffer)  # Prefetch next batch while GPU processes current batch
-    
-    # Create validation dataset
-    valid_dataset = tf.data.Dataset.from_tensor_slices((X_valid, y_valid))
-    valid_dataset = valid_dataset.batch(params.batch_size)
-    valid_dataset = valid_dataset.prefetch(prefetch_buffer)
-    
-    # Create test dataset
-    test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test))
-    test_dataset = test_dataset.batch(params.batch_size)
-    test_dataset = test_dataset.prefetch(prefetch_buffer)
-    
-    print(f"Data pipeline created with {cpu_count} parallel workers and automatic prefetching")
+def progress_bar(current, total, bar_length=50, prefix='', suffix=''):
+    """Display a progress bar in the terminal"""
+    filled_length = int(round(bar_length * current / float(total)))
+    percents = round(100.0 * current / float(total), 1)
+    bar = '█' * filled_length + '░' * (bar_length - filled_length)
+    sys.stdout.write(f'\r{prefix} |{bar}| {percents}% {suffix}')
+    sys.stdout.flush()
+    if current == total:
+        sys.stdout.write('\n')
+        sys.stdout.flush()
+
+def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logger_config=None):
+    # DEBUG: Start of training process
+    print(f"DEBUG: Starting training with {X_train.shape[0]} training samples")
     
     paths = Paths(params)
-    log = ModelCloudLog(
-        os.path.join(paths.root_path, "logs"),
-        email_config=logger_config.get("email_config")
-    )
+    log = ModelLogger(os.path.join(paths.root_path, "training_log.txt"))
     start = time.time()
     
     log.log_parameters(params, y_train.shape[0], y_valid.shape[0], y_test.shape[0])
     
-    # Create model directly from model_builder
-    model = TrafficSignModel(params)
+    # DEBUG: Check for available GPUs
+    gpus = tf.config.list_physical_devices('GPU')
+    print(f"DEBUG: Found {len(gpus)} GPUs: {gpus}")
     
-    # Learning rate schedule if enabled
-    if params.learning_rate_decay:
-        # For stage 1 (pre-training with lr=0.001), use moderate decay
-        # For stage 2 (fine-tuning with lr=0.0001), use slower decay
-        is_pretraining = params.learning_rate >= 0.001
+    # Set up TF2 strategy for potential GPU usage
+    strategy = tf.distribute.MirroredStrategy() if len(gpus) > 0 else tf.distribute.get_strategy()
+    print(f"DEBUG: Using {'multi-GPU' if len(gpus) > 0 else 'CPU'} strategy")
+    
+    with strategy.scope():
+        # Define model architecture using tf.keras
+        print("DEBUG: Building model architecture...")
+        # This is the standard model architecture used throughout the project
+        # Model Architecture:
+        # - 3 Convolutional layers with ReLU activation
+        # - 3 Max pooling layers with dropout
+        # - Flatten layer
+        # - 1 Fully connected layer with ReLU activation and dropout
+        # - Output layer with softmax activation
+        model = tf.keras.Sequential()
+        model.add(tf.keras.layers.Input(shape=(params.image_size[0], params.image_size[1], 1)))
         
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=params.learning_rate,
-            decay_steps=params.max_epochs // (2 if is_pretraining else 4),  # Faster decay for pre-training
-            decay_rate=0.1 if is_pretraining else 0.5,  # Moderate decay for pre-training, slower for fine-tuning
-            staircase=False  # Smooth decay instead of steps
-        )
-        learning_rate = lr_schedule
-    else:
-        learning_rate = params.learning_rate
-    
-    # Create optimizer optimized for mixed precision training
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    
-    # Check if mixed precision is available and being used
-    if tf.keras.mixed_precision.global_policy().name == 'mixed_float16':
-        # When using mixed precision, use loss scaling to improve numerical stability
-        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
-        print("Using mixed precision with LossScaleOptimizer")
-    
-    # Compile the model with optimized settings
-    model.compile(
-        optimizer=optimizer,
-        loss=tf.keras.losses.CategoricalCrossentropy(from_logits=True),
-        metrics=['accuracy'],
-        # Enable XLA compilation for faster execution
-        jit_compile=True
-    )
-    
-    # Create a sample input to build the model
-    sample_input = X_train[:1]
-    _ = model(sample_input, training=False)
-    model.summary()
-    
-    # Function to evaluate model (moved earlier to make it available for checkpoint restoration)
-    def get_accuracy_and_loss_in_batches(X, y, subset_percentage=1.0):
-        # Use a subset of data for faster evaluation during training
-        if subset_percentage < 1.0 and len(X) > 1000:
-            subset_size = int(len(X) * subset_percentage)
-            indices = np.random.choice(len(X), subset_size, replace=False)
-            X = X[indices]
-            y = y[indices]
-            
-        predictions = []
-        losses = []
-        batch_size = 256  # Adjust batch size as needed
+        # Convert existing model_pass function to explicit layer definitions
+        # Layer 1: Convolutional + MaxPooling
+        model.add(tf.keras.layers.Conv2D(params.conv1_d, (params.conv1_k, params.conv1_k), activation='relu', padding='same', 
+                                         name='conv1'))
+        model.add(tf.keras.layers.MaxPooling2D(pool_size=(2, 2), name='pool1'))
+        model.add(tf.keras.layers.Dropout(1 - params.conv1_p, name='dropout1'))
         
-        # Add progress tracking for large datasets
-        num_batches = (len(X) + batch_size - 1) // batch_size
-        if num_batches > 10:  # Only show progress for large datasets
-            print(f"\rEvaluating on {len(X)} samples: ", end="")
+        # Layer 2: Convolutional + MaxPooling
+        model.add(tf.keras.layers.Conv2D(params.conv2_d, (params.conv2_k, params.conv2_k), activation='relu', padding='same',
+                                         name='conv2'))
+        model.add(tf.keras.layers.MaxPooling2D(pool_size=(2, 2), name='pool2'))
+        model.add(tf.keras.layers.Dropout(1 - params.conv2_p, name='dropout2'))
         
-        for i in range(0, len(X), batch_size):
-            if num_batches > 10:
-                progress = (i // batch_size) / num_batches * 100
-                progress_bar = '█' * int(progress / 2) + '-' * (50 - int(progress / 2))
-                print(f"\r[{progress_bar}] {progress:.1f}% - Evaluating on {len(X)} samples ", end="")
-                
-            x_batch = X[i:i+batch_size]
-            y_batch = y[i:i+batch_size]
-            
-            logits = model(x_batch, training=False)
-            loss_value = tf.keras.losses.categorical_crossentropy(y_batch, logits, from_logits=True)
-            loss_value = tf.reduce_mean(loss_value)
-            pred = tf.nn.softmax(logits)
-            
-            predictions.append(pred)
-            losses.append(loss_value)
+        # Layer 3: Convolutional + MaxPooling
+        model.add(tf.keras.layers.Conv2D(params.conv3_d, (params.conv3_k, params.conv3_k), activation='relu', padding='same',
+                                         name='conv3'))
+        model.add(tf.keras.layers.MaxPooling2D(pool_size=(2, 2), name='pool3'))
+        model.add(tf.keras.layers.Dropout(1 - params.conv3_p, name='dropout3'))
         
-        if num_batches > 10:
-            print()  # New line after progress bar
-            
-        predictions = tf.concat(predictions, axis=0)
-        accuracy = 100.0 * np.sum(np.argmax(predictions, 1) == np.argmax(y, 1)) / predictions.shape[0]
-        loss = tf.reduce_mean(losses)
+        # Flatten and fully connected layers
+        model.add(tf.keras.layers.Flatten(name='flatten'))
+        model.add(tf.keras.layers.Dense(params.fc4_size, activation='relu', 
+                                        kernel_regularizer=tf.keras.regularizers.l2(params.l2_lambda) if params.l2_reg_enabled else None,
+                                        name='fc4'))
+        model.add(tf.keras.layers.Dropout(1 - params.fc4_p, name='dropout4'))
+        model.add(tf.keras.layers.Dense(params.num_classes, activation='softmax', name='output'))
         
-        return accuracy, loss.numpy()
-    
-    # Checkpoints for saving model
-    checkpoint_dir = os.path.dirname(paths.model_path)
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    checkpoint_manager = tf.train.CheckpointManager(
-        checkpoint, directory=checkpoint_dir, max_to_keep=3
-    )
-    
-    class CustomCheckpoint:
-        def __init__(self, checkpoint_manager):
-            self.manager = checkpoint_manager
-            
-        def save(self):
-            self.manager.save()
-            
-        def restore(self):
-            if self.manager.latest_checkpoint:
-                checkpoint.restore(self.manager.latest_checkpoint)
-                return True
-            return False
-    
-    # Create checkpoint wrapper for early stopping
-    custom_checkpoint = CustomCheckpoint(checkpoint_manager)
-    
-    # Initialize early stopping
-    early_stopping = EarlyStopping(custom_checkpoint, patience=params.early_stopping_patience, minimize=True)
-    
-    # Try to restore previous model if requested
-    if params.resume_training:
-        try:
-            # Try direct restore of TF checkpoint first
-            if os.path.exists(checkpoint_dir + "/checkpoint"):
-                latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
-                if latest_checkpoint:
-                    # Direct checkpoint restore
-                    status = checkpoint.restore(latest_checkpoint)
-                    status.expect_partial()  # Allow partial restore without warnings
-                    log(f"Directly restored previously trained model from {latest_checkpoint}")
-                    
-                    # Extract epoch number from checkpoint name if possible
-                    try:
-                        checkpoint_name = os.path.basename(latest_checkpoint)
-                        if '-' in checkpoint_name:
-                            checkpoint_epoch = int(checkpoint_name.split('-')[1])
-                            early_stopping.best_monitored_epoch = checkpoint_epoch
-                            log(f"Set best monitored epoch to {checkpoint_epoch}")
-                    except:
-                        pass
-                        
-                    # Ensure optimizer state is properly warmed up with multiple steps
-                    log("Warming up optimizer state...")
-                    for i in range(3):  # Run a few steps to ensure proper optimizer state
-                        dummy_data = X_train[i*params.batch_size:(i+1)*params.batch_size]
-                        dummy_labels = y_train[i*params.batch_size:(i+1)*params.batch_size]
-                        
-                        # Run optimization step
-                        with tf.GradientTape() as tape:
-                            logits = model(dummy_data, training=True)
-                            loss_value = tf.keras.losses.categorical_crossentropy(dummy_labels, logits, from_logits=True)
-                            loss_value = tf.reduce_mean(loss_value)
-                            
-                        gradients = tape.gradient(loss_value, model.trainable_variables)
-                        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-                    
-                    # Evaluate to set early stopping variables appropriately
-                    val_acc, val_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid, subset_percentage=0.2)
-                    early_stopping.best_monitored_value = val_loss
-                    log(f"Set best monitored value to {val_loss:.8f}")
-                    log("Optimizer state reactivated and early stopping initialized")
-                else:
-                    # Fallback to using our custom checkpoint manager
-                    if custom_checkpoint.restore():
-                        log("Restored previously trained model via checkpoint manager.")
-                        # Rest of optimization warm-up
-                        dummy_data = X_train[:params.batch_size]
-                        dummy_labels = y_train[:params.batch_size]
-                        
-                        with tf.GradientTape() as tape:
-                            logits = model(dummy_data, training=True)
-                            loss_value = tf.keras.losses.categorical_crossentropy(dummy_labels, logits, from_logits=True)
-                            loss_value = tf.reduce_mean(loss_value)
-                            
-                        gradients = tape.gradient(loss_value, model.trainable_variables)
-                        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-                        
-                        log("Optimizer state reactivated.")
-                    else:
-                        log("No checkpoint found, starting from scratch.")
+        # Print model summary for debugging
+        model.summary()
+        print("DEBUG: Model architecture built successfully")
+        
+        # Learning rate schedule with proper decay rates
+        if params.learning_rate_decay:
+            print(f"DEBUG: Using learning rate decay from {params.learning_rate}")
+            # Configure more effective decay settings based on initial learning rate
+            if params.learning_rate >= 0.001:
+                # For training mode: faster decay early, then more gradual
+                decay_steps = 500  # Decay more frequently during training
+                decay_rate = 0.95  # More gradual decay (95% of previous value)
+                print(f"DEBUG: Training mode decay: rate={decay_rate}, steps={decay_steps}")
             else:
-                # Fallback to using our custom checkpoint manager
-                if custom_checkpoint.restore():
-                    log("Restored previously trained model via checkpoint manager.")
-                    # Rest of optimization warm-up
-                    dummy_data = X_train[:params.batch_size]
-                    dummy_labels = y_train[:params.batch_size]
-                    
-                    with tf.GradientTape() as tape:
-                        logits = model(dummy_data, training=True)
-                        loss_value = tf.keras.losses.categorical_crossentropy(dummy_labels, logits, from_logits=True)
-                        loss_value = tf.reduce_mean(loss_value)
-                        
-                    gradients = tape.gradient(loss_value, model.trainable_variables)
-                    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-                    
-                    log("Optimizer state reactivated.")
-                else:
-                    log("No checkpoint found, starting from scratch.")
+                # For evaluation/prediction mode: very slow decay to fine-tune
+                decay_steps = 2000  # Decay less frequently during evaluation
+                decay_rate = 0.98  # Very slow decay (98% of previous value)
+                print(f"DEBUG: Evaluation mode decay: rate={decay_rate}, steps={decay_steps}")
+            
+            lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+                initial_learning_rate=params.learning_rate,
+                decay_steps=decay_steps,
+                decay_rate=decay_rate,
+                staircase=True)
+            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+        else:
+            print(f"DEBUG: Using constant learning rate {params.learning_rate}")
+            optimizer = tf.keras.optimizers.Adam(learning_rate=params.learning_rate)
+        
+        # Compile the model
+        print("DEBUG: Compiling model...")
+        model.compile(
+            optimizer=optimizer,
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
+    
+    # Try to load weights if resuming training
+    if params.resume_training:
+        print(f"DEBUG: Attempting to load weights from {paths.model_path}")
+        try:
+            # Check if the file exists before trying to load it
+            if os.path.exists(paths.model_path):
+                model.load_weights(paths.model_path)
+                log("Successfully loaded previously trained model weights")
+                print("DEBUG: Model weights loaded successfully")
+            else:
+                log("No previous model weights found, starting with fresh weights")
+                print("DEBUG: No previous model weights found")
         except Exception as e:
             log(f"Failed restoring previously trained model: {e}")
+            print(f"DEBUG: Failed to load weights: {e}")
+            log("Continuing with fresh model weights")
+            print("DEBUG: Continuing with fresh model weights")
     
-    # Training history
-    train_loss_history = np.empty([0], dtype=np.float32)
-    train_accuracy_history = np.empty([0], dtype=np.float32)
-    valid_loss_history = np.empty([0], dtype=np.float32)
-    valid_accuracy_history = np.empty([0], dtype=np.float32)
+    # Create callbacks
+    print("DEBUG: Setting up callbacks...")
+    callbacks = [
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=paths.model_path,
+            save_best_only=True,
+            save_weights_only=True,
+            monitor='val_loss',
+            mode='min',
+            verbose=1  # Print when model is saved
+        ),
+        tf.keras.callbacks.CSVLogger(os.path.join(paths.root_path, 'training_log.csv')),
+    ]
     
-    # Define the training step with XLA compilation for better GPU performance
-    @tf.function(jit_compile=True)
-    def train_step(x, y):
-        with tf.GradientTape() as tape:
-            logits = model(x, training=True)
-            loss_value = tf.keras.losses.categorical_crossentropy(y, logits, from_logits=True)
-            loss_value = tf.reduce_mean(loss_value)
-            
-            # Add L2 regularization if enabled
-            if params.l2_reg_enabled:
-                l2_losses = []
-                for var in model.trainable_variables:
-                    if 'kernel' in var.name or 'weights' in var.name:
-                        l2_losses.append(tf.nn.l2_loss(var))
-                if l2_losses:
-                    l2_loss = tf.add_n(l2_losses)
-                    loss_value += params.l2_lambda * l2_loss
+    # Add early stopping if enabled
+    if params.early_stopping_enabled:
+        print(f"DEBUG: Adding early stopping with patience {params.early_stopping_patience}")
+        callbacks.append(tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=params.early_stopping_patience,
+            mode='min',
+            restore_best_weights=True,
+            verbose=1  # Print when early stopping triggers
+        ))
+    
+    # Custom callback for logging and progress tracking
+    class ProgressLoggingCallback(tf.keras.callbacks.Callback):
+        def __init__(self, log_function, model_params, train_data_info):
+            super(ProgressLoggingCallback, self).__init__()
+            self.log = log_function
+            self.model_params = model_params  # Renamed to avoid conflict with Keras internal params
+            self.train_data_info = train_data_info
+            self.start_time = time.time()
+            self.epoch_start_time = None
+            self.train_batches = None
+            self.best_val_loss = float('inf')
+            self.best_val_acc = 0
         
-        gradients = tape.gradient(loss_value, model.trainable_variables)
-        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-        return loss_value, tf.reduce_mean(tf.cast(tf.equal(tf.argmax(logits, axis=1), tf.argmax(y, axis=1)), tf.float32))
+        def on_train_begin(self, logs=None):
+            print("DEBUG: Training started")
+            self.train_batches = int(np.ceil(self.train_data_info.train_data_size / self.model_params.batch_size))
+            
+        def on_epoch_begin(self, epoch, logs=None):
+            self.epoch_start_time = time.time()
+            print(f"\nEpoch {epoch+1}/{self.model_params.max_epochs}")
+            
+        def on_train_batch_end(self, batch, logs=None):
+            # Update progress bar after each batch
+            progress_bar(
+                batch + 1, 
+                self.train_batches, 
+                prefix=f'Training batch {batch+1}/{self.train_batches}', 
+                suffix=f'Loss: {logs["loss"]:.4f}, Accuracy: {logs["accuracy"]:.4f}'
+            )
+            
+        def on_epoch_end(self, epoch, logs=None):
+            epoch_time = time.time() - self.epoch_start_time
+            
+            # Track best metrics
+            if logs.get('val_loss', float('inf')) < self.best_val_loss:
+                self.best_val_loss = logs.get('val_loss')
+                improved_loss = "✓"
+            else:
+                improved_loss = " "
+                
+            if logs.get('val_accuracy', 0) > self.best_val_acc:
+                self.best_val_acc = logs.get('val_accuracy')
+                improved_acc = "✓"
+            else:
+                improved_acc = " "
+            
+            # Log detailed metrics at specified intervals
+            if epoch % self.model_params.print_epoch == 0:
+                self.log(f"-------------- EPOCH {epoch+1:4d}/{self.model_params.max_epochs} --------------")
+                self.log(f" Train loss: {logs['loss']:.8f}, accuracy: {logs['accuracy'] * 100:.2f}%")
+                self.log(f" Validation loss: {logs['val_loss']:.8f}, accuracy: {logs['val_accuracy'] * 100:.2f}%")
+                self.log(f" Best val loss: {self.best_val_loss:.8f}, Best val accuracy: {self.best_val_acc * 100:.2f}%")
+                self.log(f" Epoch time: {epoch_time:.2f}s, Total time: {get_time_hhmmss(self.start_time)}")
+                self.log(f" Timestamp: {get_time_hhmmss()}")
+                self.log.sync()
+            
+            # Always print a summary to console
+            # Access learning rate in a way that's compatible with TF 2.x
+            try:
+                # More robust way to get learning rate that works with different TensorFlow versions
+                if hasattr(self.model.optimizer, 'learning_rate'):
+                    lr = self.model.optimizer.learning_rate
+                    if hasattr(lr, 'numpy'):
+                        current_lr = lr.numpy()
+                    elif callable(lr):
+                        current_lr = float(lr(self.model.optimizer.iterations))
+                    else:
+                        current_lr = float(lr)
+                elif hasattr(self.model.optimizer, '_decayed_lr'):
+                    # For older TensorFlow versions
+                    current_lr = float(self.model.optimizer._decayed_lr(tf.float32))
+                elif hasattr(self.model.optimizer, 'lr'):
+                    # For very old TensorFlow versions
+                    current_lr = float(self.model.optimizer.lr)
+                else:
+                    # Last resort
+                    current_lr = 0.0
+            except Exception as e:
+                print(f"DEBUG: Unable to get learning rate: {e}")
+                current_lr = 0.0
+                
+            print(f"\nEpoch {epoch+1}/{self.model_params.max_epochs} completed in {epoch_time:.2f}s")
+            print(f"Loss: {logs['loss']:.4f} [train], {logs['val_loss']:.4f} [val] {improved_loss}")
+            print(f"Accuracy: {logs['accuracy']*100:.2f}% [train], {logs['val_accuracy']*100:.2f}% [val] {improved_acc}")
+            print(f"Learning rate: {current_lr:.8f}")
+            
+    # Create a custom object to track train data size
+    # Since params is a namedtuple and can't be modified directly
+    train_data_info = type('TrainDataInfo', (), {})()
+    train_data_info.train_data_size = len(X_train)
+    
+    # Pass both the params and the train data info to the callback
+    callbacks.append(ProgressLoggingCallback(log, params, train_data_info))
     
     if params.max_epochs > 0:
         log("================= TRAINING ==================")
+        print("DEBUG: Starting training loop...")
+        
+        # Train the model
+        history = model.fit(
+            X_train, y_train,
+            epochs=params.max_epochs,
+            batch_size=params.batch_size,
+            validation_data=(X_valid, y_valid),
+            callbacks=callbacks,
+            verbose=0  # We'll use our own progress reporting
+        )
+        
+        print("DEBUG: Training completed, saving history...")
+        # Save training history
+        history_dict = {
+            'train_loss_history': history.history['loss'],
+            'train_accuracy_history': [acc * 100 for acc in history.history['accuracy']],
+            'valid_loss_history': history.history['val_loss'],
+            'valid_accuracy_history': [acc * 100 for acc in history.history['val_accuracy']]
+        }
+        np.savez(paths.train_history_path, **history_dict)
     else:
         log("================== TESTING ==================")
         log(f" Timestamp: {get_time_hhmmss()}")
         log.sync()
     
-    # Main training loop using tf.data pipeline for better performance
-    for epoch in range(params.max_epochs):
-        # Reset metrics for this epoch
-        epoch_loss_avg = tf.keras.metrics.Mean()
-        epoch_accuracy = tf.keras.metrics.CategoricalAccuracy()
-        
-        # Display epoch progress
-        epoch_progress = epoch / params.max_epochs * 100
-        progress_bar = '█' * int(epoch_progress / 2) + '-' * (50 - int(epoch_progress / 2))
-        print(f"\r[{progress_bar}] {epoch_progress:.1f}% - Epoch {epoch}/{params.max_epochs} ", end='', flush=True)
-        
-        # Track time per epoch
-        epoch_start_time = time.time()
-        
-        # Train on batches from tf.data pipeline
-        step = 0
-        total_steps = len(X_train) // params.batch_size
-        
-        for x_batch, y_batch in train_dataset:
-            # Update progress within epoch
-            if step % max(1, total_steps // 20) == 0:  # Show ~20 updates during an epoch
-                batch_progress = step / total_steps * 100
-                print(f"\r[{progress_bar}] {epoch_progress:.1f}% - Epoch {epoch}/{params.max_epochs} - Batch progress: {batch_progress:.1f}% ", end='', flush=True)
-            
-            # Perform training step
-            loss_value, accuracy = train_step(x_batch, y_batch)
-            
-            # Update metrics
-            epoch_loss_avg.update_state(loss_value)
-            epoch_accuracy.update_state(y_batch, model(x_batch, training=False))
-            
-            step += 1
-        
-        # If another significant epoch ended, we log our losses.
-        if epoch % params.log_epoch == 0:
-            # Get validation metrics using our optimized dataset
-            valid_loss_avg = tf.keras.metrics.Mean()
-            valid_accuracy_metric = tf.keras.metrics.CategoricalAccuracy()
-            
-            # Use the validation dataset for evaluation
-            for x_valid_batch, y_valid_batch in valid_dataset:
-                # Get model predictions
-                valid_predictions = model(x_valid_batch, training=False)
-                
-                # Calculate validation loss
-                v_loss = tf.reduce_mean(
-                    tf.keras.losses.categorical_crossentropy(y_valid_batch, valid_predictions, from_logits=True)
-                )
-                
-                # Update metrics
-                valid_loss_avg.update_state(v_loss)
-                valid_accuracy_metric.update_state(y_valid_batch, valid_predictions)
-            
-            # Get the current metrics
-            train_loss = epoch_loss_avg.result().numpy()
-            train_accuracy = epoch_accuracy.result().numpy() * 100
-            valid_loss = valid_loss_avg.result().numpy()
-            valid_accuracy = valid_accuracy_metric.result().numpy() * 100
-            
-            # Update histories
-            train_loss_history = np.append(train_loss_history, train_loss)
-            train_accuracy_history = np.append(train_accuracy_history, train_accuracy)
-            valid_loss_history = np.append(valid_loss_history, valid_loss)
-            valid_accuracy_history = np.append(valid_accuracy_history, valid_accuracy)
-            
-            # Check early stopping condition
-            if params.early_stopping_enabled:
-                # Here we pass our validation loss to early stopping which
-                # will save a checkpoint if improved or terminate if stalled for too long
-                if early_stopping(valid_loss, epoch):
-                    log(f"Early stopping triggered at epoch {epoch}.")
-                    log(f"Best monitored loss was {early_stopping.best_monitored_value:.8f} at epoch {early_stopping.best_monitored_epoch}.")
-                    break
-            
-            # Log results
-            if epoch % params.print_epoch == 0:
-                epoch_time = time.time() - epoch_start_time
-                log(f"-------------- EPOCH {epoch:4d}/{params.max_epochs} --------------")
-                log(f" Train loss: {train_loss:.8f}, accuracy: {train_accuracy:.2f}%")
-                log(f" Validation loss: {valid_loss:.8f}, accuracy: {valid_accuracy:.2f}%")
-                log(f" Best loss: {early_stopping.best_monitored_value:.8f} at epoch {early_stopping.best_monitored_epoch}")
-                log(f" Epoch time: {epoch_time:.2f}s, Total time: {get_time_hhmmss(start)}")
-                
-                # Create a plot of learning curves
-                plt.figure(figsize=(12, 4))
-                plt.subplot(1, 2, 1)
-                plt.plot(train_loss_history, label='Train')
-                plt.plot(valid_loss_history, label='Validation')
-                plt.title('Loss')
-                plt.legend()
-                
-                plt.subplot(1, 2, 2)
-                plt.plot(train_accuracy_history, label='Train')
-                plt.plot(valid_accuracy_history, label='Validation')
-                plt.title('Accuracy')
-                plt.legend()
-                
-                log.add_plot(
-                    notify=(epoch > 0 and epoch % 10 == 0), 
-                    caption=f"Epoch {epoch}/{params.max_epochs}: Train acc={train_accuracy:.2f}%, Valid acc={valid_accuracy:.2f}%"
-                )
-                log(f" Timestamp: {get_time_hhmmss()}")
-                log.sync()
+    # Evaluate on test dataset
+    print("DEBUG: Evaluating on test set...")
+    print("Evaluating test set:")
+    test_results = model.evaluate(X_test, y_test, verbose=1)
     
-    # Evaluate on test dataset.
-    print("\nEvaluating on test dataset...")
-    test_accuracy, test_loss = get_accuracy_and_loss_in_batches(X_test, y_test)
-    valid_accuracy, valid_loss = get_accuracy_and_loss_in_batches(X_valid, y_valid)
+    print("Evaluating validation set:")
+    valid_results = model.evaluate(X_valid, y_valid, verbose=1)
+    
     log("=============================================")
-    log(f" Valid loss: {valid_loss:.8f}, accuracy = {valid_accuracy:.2f}%")
-    log(f" Test loss: {test_loss:.8f}, accuracy = {test_accuracy:.2f}%")
+    log(f" Valid loss: {valid_results[0]:.8f}, accuracy = {valid_results[1] * 100:.2f}%")
+    log(f" Test loss: {test_results[0]:.8f}, accuracy = {test_results[1] * 100:.2f}%")
     log(f" Total time: {get_time_hhmmss(start)}")
     log(f" Timestamp: {get_time_hhmmss()}")
     
-    # Save model weights for future use.
-    saved_model_path = checkpoint_manager.save()
-    log(f"Model file: {saved_model_path}")
+    # Save model weights
+    print("DEBUG: Saving final model weights...")
+    model.save_weights(paths.model_path)
+    log(f"Model file: {paths.model_path}")
     
-    # Also save as a complete Keras model
-    model_save_path = os.path.join(paths.root_path, "keras_model")
-    model.save(model_save_path)
-    log(f"Keras model saved to: {model_save_path}")
-    
-    np.savez(paths.train_history_path, 
-            train_loss_history=train_loss_history,
-            train_accuracy_history=train_accuracy_history,
-            valid_loss_history=valid_loss_history,
-            valid_accuracy_history=valid_accuracy_history)
     log(f"Train history file: {paths.train_history_path}")
-    log.sync(notify=True, message=f"Finished training with {test_accuracy:.2f}% accuracy on the testing set (loss = {test_loss:.6f}).")
+    log.sync(notify=True, message=f"Finished training with {test_results[1] * 100:.2f}% accuracy on the testing set (loss = {test_results[0]:.6f}).")
     
+    # Generate and save learning curves
+    print("DEBUG: Generating learning curves...")
     plot_learning_curves(params)
+    plt.savefig(paths.learning_curves_path)
     log.add_plot(notify=True, caption="Learning curves")
     plt.show()
+    
+    print("DEBUG: Training process completed successfully")
+    return model
 
 class Paths:
     def __init__(self, params):
@@ -603,7 +424,8 @@ class Paths:
         return var_scope
     
     def get_model_path(self):
-        return self.root_path + "model.ckpt"
+        # Use .weights.h5 extension for compatibility with Keras 3
+        return self.root_path + "model.weights.h5"
     
     def get_train_history_path(self):
         return self.root_path + "train_history"

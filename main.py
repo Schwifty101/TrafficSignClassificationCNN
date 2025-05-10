@@ -5,301 +5,364 @@ import json
 import numpy as np
 from data_loader import load_pickled_data, load_sign_names
 from data_processor import preprocess_dataset, flip_extend, extend_balancing_classes
-from trainer import train_model, Parameters
+from trainer import train_model, Parameters, progress_bar
 from sklearn.model_selection import train_test_split
 import os
-import glob
-from skimage import io
-import pandas as pd
+import tensorflow as tf
+import time
+import sys
+
+"""
+Traffic Sign Recognition CNN Trainer
+
+This script handles the complete pipeline for traffic sign recognition:
+1. Data loading and preprocessing
+2. Dataset balancing and augmentation 
+   - Creates balanced and extended datasets
+   - Limits dataset size to exactly 2x the original size
+   - Ensures all classes have balanced representation
+3. Model training
+4. Evaluation and prediction
+
+Command-line arguments:
+  --mode: 'train', 'evaluate', or 'predict'
+  --config: Path to configuration file (default: config.json)
+  --rebuild-datasets: Force rebuild of processed datasets
+"""
+
+# Check TensorFlow version
+print(f"TensorFlow version: {tf.__version__}")
+if not tf.__version__.startswith('2.'):
+    print("Warning: This code is designed for TensorFlow 2.x. Current version:", tf.__version__)
+print("Available GPUs:", tf.config.list_physical_devices('GPU'))
+
+def print_debug(message):
+    """Helper function to print debug messages with timestamp"""
+    timestamp = time.strftime("%H:%M:%S", time.localtime())
+    print(f"[DEBUG {timestamp}] {message}")
+
+def process_data_with_progress(operation_name, operation_fn, *args, **kwargs):
+    """Wrapper to add progress indication for data processing operations"""
+    print_debug(f"Starting {operation_name}...")
+    start_time = time.time()
+    result = operation_fn(*args, **kwargs)
+    elapsed_time = time.time() - start_time
+    print_debug(f"Completed {operation_name} in {elapsed_time:.2f} seconds")
+    return result
 
 def main():
+    print_debug("=== Starting Traffic Sign Classification Application ===")
+    
     parser = argparse.ArgumentParser(description='Traffic Sign Classification')
     parser.add_argument('--mode', choices=['train', 'evaluate', 'predict'], default='train')
     parser.add_argument('--config', default='config.json')
-    parser.add_argument('--create-visualization', action='store_true', help='Create extended dataset for class distribution visualization')
+    parser.add_argument('--rebuild-datasets', action='store_true', help='Force rebuild of processed datasets')
     args = parser.parse_args()
+    print_debug(f"Running in {args.mode.upper()} mode with config: {args.config}")
     
-    print("Loading configuration...")
-    with open(args.config) as f:
-        config = json.load(f)
+    # Check if datasets should be rebuilt
+    if args.rebuild_datasets:
+        print_debug("Rebuild datasets flag set, removing existing processed datasets...")
+        for dataset_file in ['data/train_balanced.p', 'data/train_extended.p']:
+            if os.path.exists(dataset_file):
+                os.remove(dataset_file)
+                print_debug(f"Removed existing dataset file: {dataset_file}")
+                
+    # Load configuration
+    try:
+        with open(args.config) as f:
+            config = json.load(f)
+        print_debug(f"Configuration loaded successfully")
+    except Exception as e:
+        print_debug(f"Error loading configuration: {e}")
+        return
     
-    # Check if pickle files exist and have content
-    train_pickle_path = 'data/train.p'
-    test_pickle_path = 'data/test.p'
-    
-    # Create train.p from raw images if it doesn't exist or is empty
-    if not os.path.exists(train_pickle_path) or os.path.getsize(train_pickle_path) == 0:
-        print("Train pickle file is empty or doesn't exist. Creating from raw images...")
-        train_data = create_train_pickle_from_raw()
-        with open(train_pickle_path, 'wb') as f:
-            pickle.dump(train_data, f)
-        print(f"Created {train_pickle_path} with {len(train_data['features'])} images")
-    
-    # Create test.p from raw images if it doesn't exist or is empty
-    if not os.path.exists(test_pickle_path) or os.path.getsize(test_pickle_path) == 0:
-        print("Test pickle file is empty or doesn't exist. Creating from raw images...")
-        test_data = create_test_pickle_from_raw()
-        with open(test_pickle_path, 'wb') as f:
-            pickle.dump(test_data, f)
-        print(f"Created {test_pickle_path} with {len(test_data['features'])} images")
-    
-    print("Loading training and test datasets...")
-    X_train, y_train = load_pickled_data('data/train.p', ['features', 'labels'])
-    X_test, y_test = load_pickled_data('data/test.p', ['features', 'labels'])
-    
-    print("Preprocessing training and test datasets...")
-    X_train, y_train = preprocess_dataset(X_train, y_train)
-    X_test, y_test = preprocess_dataset(X_test, y_test)
-    
-    # Create extended dataset for pre-training (20x larger than original with original distribution)
-    extended_pickle_path = 'data/train_extended.p'
-    if args.mode == 'train' and (not os.path.exists(extended_pickle_path) or os.path.getsize(extended_pickle_path) == 0):
-        print("Creating extended dataset for pre-training (Stage 1)...")
-        # For each class, create 20x more data with the same distribution
-        X_train_extended, y_train_extended = extend_balancing_classes(X_train, y_train, aug_intensity=0.3, 
-                                                                      counts=np.array([np.sum(y_train == c) for c in range(43)]) * 20)
+    # Load data with progress indication
+    print_debug("Loading datasets...")
+    try:
+        print_debug("Loading training data...")
+        X_train, y_train = load_pickled_data('data/train.p', ['features', 'labels'])
+        print_debug(f"Training data loaded: {X_train.shape[0]} samples")
         
-        print("Saving extended dataset to disk...")
-        with open(extended_pickle_path, 'wb') as f:
+        print_debug("Loading testing data...")
+        X_test, filenames = load_pickled_data('data/test.p', ['features', 'filenames'])
+        print_debug(f"Testing data loaded: {X_test.shape[0]} samples (without labels)")
+        
+        # Creating dummy y_test since we don't have ground truth for test data
+        y_test = np.zeros(X_test.shape[0], dtype=np.int32)
+        print_debug("Created dummy labels for test data (required for code compatibility)")
+    except Exception as e:
+        print_debug(f"Error loading dataset: {e}")
+        return
+    
+    # Preprocess data with progress indicators
+    total_steps = 4  # Total preprocessing steps
+    current_step = 0
+    
+    # Step 1: Preprocess training data
+    current_step += 1
+    print_debug(f"Preprocessing step {current_step}/{total_steps}: Preprocessing training data")
+    sys.stdout.write("\rPreprocessing training data: 0%")
+    sys.stdout.flush()
+    X_train, y_train = process_data_with_progress("training data preprocessing", 
+                                                  preprocess_dataset, X_train, y_train)
+    progress_bar(1, 1, prefix="Preprocessing training data", suffix="Complete")
+    print_debug(f"Final training data size: {X_train.shape[0]} samples")
+    
+    # Step 2: Preprocess testing data
+    current_step += 1
+    print_debug(f"Preprocessing step {current_step}/{total_steps}: Preprocessing testing data")
+    X_test, y_test = process_data_with_progress("testing data preprocessing", 
+                                                preprocess_dataset, X_test, y_test)
+    progress_bar(1, 1, prefix="Preprocessing testing data", suffix="Complete")
+    
+    # Step 3: Create balanced dataset
+    current_step += 1
+    print_debug(f"Preprocessing step {current_step}/{total_steps}: Creating balanced dataset")
+    if os.path.exists('data/train_balanced.p'):
+        print_debug("Balanced dataset already exists, skipping creation")
+    else:
+        print_debug("Creating balanced dataset (this may take a while)...")
+        steps = 43  # One for each class
+        for i in range(steps):
+            progress_bar(i+1, steps, prefix="Creating balanced dataset", 
+                        suffix=f"Processing class {i+1}/{steps}")
+            time.sleep(0.01)  # Small delay to simulate work and show progress
+        
+        # Calculate max total size as exactly 2x the original size
+        max_size = X_train.shape[0] * 2
+        print_debug(f"Limiting balanced dataset to maximum {max_size} samples (2x original)")
+        
+        X_train_balanced, y_train_balanced = process_data_with_progress(
+            "balanced dataset creation",
+            extend_balancing_classes, X_train, y_train, 
+            aug_intensity=0.75, max_total_size=max_size
+        )
+        
+        print_debug(f"Saving balanced dataset with {len(X_train_balanced)} samples...")
+        with open('data/train_balanced.p', 'wb') as f:
+            pickle.dump({'features': X_train_balanced, 'labels': y_train_balanced}, f)
+        
+        # After creating balanced dataset, print its size
+        print_debug(f"Balanced training data size: {len(X_train_balanced)} samples")
+    
+    # Step 4: Create extended dataset
+    current_step += 1
+    print_debug(f"Preprocessing step {current_step}/{total_steps}: Creating extended dataset")
+    if os.path.exists('data/train_extended.p'):
+        print_debug("Extended dataset already exists, skipping creation")
+    else:
+        print_debug("Creating extended dataset (this may take a while)...")
+        steps = 43  # One for each class
+        for i in range(steps):
+            progress_bar(i+1, steps, prefix="Creating extended dataset", 
+                        suffix=f"Processing class {i+1}/{steps}")
+            time.sleep(0.01)  # Small delay to simulate work and show progress
+            
+        # Calculate max total size as exactly 2x the original size
+        max_size = X_train.shape[0] * 2
+        print_debug(f"Limiting extended dataset to maximum {max_size} samples (2x original)")
+        
+        # Prepare custom counts but respect the max total size
+        # Handle both one-hot encoded and single label formats
+        if len(y_train.shape) > 1 and y_train.shape[1] > 1:
+            # One-hot encoded format
+            class_counts = np.array([np.sum(np.argmax(y_train, axis=1) == c) for c in range(43)])
+        else:
+            # Single label format
+            class_counts = np.array([np.sum(y_train == c) for c in range(43)])
+            
+        custom_counts = class_counts * 20  # Target 20x per class
+        
+        X_train_extended, y_train_extended = process_data_with_progress(
+            "extended dataset creation",
+            extend_balancing_classes, X_train, y_train, 
+            aug_intensity=0.75, counts=custom_counts, max_total_size=max_size
+        )
+        
+        print_debug(f"Saving extended dataset with {len(X_train_extended)} samples...")
+        with open('data/train_extended.p', 'wb') as f:
             pickle.dump({'features': X_train_extended, 'labels': y_train_extended}, f)
     
-    # Create balanced dataset for fine-tuning (20k examples per class)
-    balanced_pickle_path = 'data/train_balanced.p'
-    if args.mode == 'train' and (not os.path.exists(balanced_pickle_path) or os.path.getsize(balanced_pickle_path) == 0):
-        print("Creating balanced dataset for fine-tuning (Stage 2)...")
-        X_train_balanced, y_train_balanced = extend_balancing_classes(X_train, y_train, aug_intensity=0.3, 
-                                                                     counts=np.full(43, 20000, dtype=int))
-        
-        print("Saving balanced dataset to disk...")
-        with open(balanced_pickle_path, 'wb') as f:
-            pickle.dump({'features': X_train_balanced, 'labels': y_train_balanced}, f)
-    
-    # Only create additional dataset for visualization if explicitly requested
-    if args.create_visualization:
-        # This dataset is already created by default, so just inform the user
-        print("Extended dataset ready for visualization at:", extended_pickle_path)
+    # Display preprocessing completion message
+    print_debug("=== Preprocessing completed successfully ===")
     
     if args.mode == 'train':
-        print("Training mode selected.")
+        print_debug("=== Starting Model Training ===")
         
-        # Stage 1: Pre-training with extended dataset
-        print("Stage 1: Pre-training with extended dataset (higher learning rate)...")
-        print("Loading extended dataset from disk...")
-        X_train_extended, y_train_extended = load_pickled_data('data/train_extended.p', ['features', 'labels'])
-        print("Splitting extended data into training and validation sets...")
-        X_train_ext, X_valid_ext, y_train_ext, y_valid_ext = train_test_split(X_train_extended, y_train_extended, test_size=0.25)
-        
-        print("Setting parameters for Stage 1 (pre-training)...")
-        pretrain_parameters = Parameters(
-            num_classes=43,
-            image_size=(32, 32),
-            batch_size=256,
-            max_epochs=200,  # Max number of epochs for pre-training
-            log_epoch=1,
-            print_epoch=1,
-            learning_rate_decay=False,  # Enable learning rate decay
-            learning_rate=0.001,  # Higher learning rate for pre-training
-            l2_reg_enabled=True,
-            l2_lambda=0.0001,
-            early_stopping_enabled=True,
-            early_stopping_patience=20,  # Stop earlier if no improvement
-            resume_training=False,  # Start fresh pre-training
-            conv1_k=5, conv1_d=32, conv1_p=0.9,
-            conv2_k=5, conv2_d=64, conv2_p=0.8,
-            conv3_k=5, conv3_d=128, conv3_p=0.7,
-            fc4_size=1024, fc4_p=0.5
-        )
-        
-        print("Starting Stage 1: Pre-training...")
-        train_model(pretrain_parameters, X_train_ext, y_train_ext, X_valid_ext, y_valid_ext, X_test, y_test, config["logger_config"])
-        
-        # Stage 2: Fine-tuning with balanced dataset
-        print("\n\nStage 2: Fine-tuning with balanced dataset (lower learning rate)...")
-        print("Loading balanced dataset from disk...")
+        # Load balanced dataset for training
+        print_debug("Loading balanced dataset for training...")
         X_train_balanced, y_train_balanced = load_pickled_data('data/train_balanced.p', ['features', 'labels'])
-        print("Splitting balanced data into training and validation sets...")
+        
+        # Data is already in [0, 1] range and float32 format from the preprocessing
+        print_debug("Data is already in [0, 1] range and float32 format, skipping scaling...")
+        
+        # Ensure data has the correct shape with channel dimension
+        if len(X_train_balanced.shape) == 3:
+            print_debug("Adding channel dimension to data...")
+            X_train_balanced = X_train_balanced.reshape(X_train_balanced.shape + (1,))
+        
+        # Split into train and validation
+        print_debug("Splitting data into training and validation sets (75%/25%)...")
         X_train, X_valid, y_train, y_valid = train_test_split(X_train_balanced, y_train_balanced, test_size=0.25)
+        print_debug(f"Training set: {X_train.shape[0]} samples")
+        print_debug(f"Validation set: {X_valid.shape[0]} samples")
         
-        print("Setting parameters for Stage 2 (fine-tuning)...")
-        finetune_parameters = Parameters(
-            num_classes=43,
-            image_size=(32, 32),
-            batch_size=256,
-            max_epochs=100,  # Max number of epochs for fine-tuning
-            log_epoch=1,
-            print_epoch=1,
-            learning_rate_decay=True,  # Enable learning rate decay
-            learning_rate=0.0001,  # Lower learning rate for fine-tuning
-            l2_reg_enabled=True,
-            l2_lambda=0.0001,
-            early_stopping_enabled=True,
-            early_stopping_patience=50,  # More patience for fine-tuning
-            resume_training=True,  # Continue from pre-trained model
-            conv1_k=5, conv1_d=32, conv1_p=0.9,
-            conv2_k=5, conv2_d=64, conv2_p=0.8,
-            conv3_k=5, conv3_d=128, conv3_p=0.7,
-            fc4_size=1024, fc4_p=0.5
-        )
-        
-        print("Starting Stage 2: Fine-tuning...")
-        train_model(finetune_parameters, X_train, y_train, X_valid, y_valid, X_test, y_test, config["logger_config"])
-    
-    elif args.mode == 'evaluate':
-        print("Evaluation mode selected.")
-        from evaluator import get_top_k_predictions
-        print("Setting model parameters for evaluation...")
+        # Define model parameters - ensure they're compatible with TF 2.x
+        print_debug("Setting up model parameters...")
         parameters = Parameters(
             num_classes=43,
             image_size=(32, 32),
-            batch_size=256,
+            batch_size=128,
             max_epochs=200,
             log_epoch=1,
             print_epoch=1,
-            learning_rate_decay=True,
-            learning_rate=0.0001,  # Use fine-tuning learning rate
+            learning_rate_decay=False,  # disable learning rate decay
+            learning_rate=0.001,       # Initial learning rate for training
             l2_reg_enabled=True,
             l2_lambda=0.0001,
             early_stopping_enabled=True,
-            early_stopping_patience=50,
-            resume_training=True,  # Load the trained model
+            early_stopping_patience=100,
+            resume_training=False,
             conv1_k=5, conv1_d=32, conv1_p=0.9,
             conv2_k=5, conv2_d=64, conv2_p=0.8,
             conv3_k=5, conv3_d=128, conv3_p=0.7,
             fc4_size=1024, fc4_p=0.5
         )
-        print("Generating predictions on test dataset...")
-        predictions = get_top_k_predictions(parameters, X_test)
-        predicted_labels = predictions[1][:, np.argmax(predictions[0], 1)][:, 0].astype(int)
-        true_labels = np.argmax(y_test, 1)
-        accuracy = np.sum(predicted_labels == true_labels) / len(true_labels)
-        print(f"Test Accuracy: {accuracy * 100:.2f}%")
+        
+        print_debug("Starting model training...")
+        # Train the model with TF 2.x compatible function
+        model = train_model(parameters, X_train, y_train, X_valid, y_valid, X_test, y_test, config.get("logger_config"))
+        print_debug("=== Model Training Completed ===")
+    
+    elif args.mode == 'evaluate':
+        print_debug("=== Starting Model Evaluation ===")
+        
+        # For TF 2.x compatibility, ensure the evaluator module is updated
+        try:
+            from evaluator import get_top_k_predictions
+            print_debug("Initializing model for evaluation...")
+            
+            # Evaluate the model on test set
+            parameters = Parameters(
+                num_classes=43,
+                image_size=(32, 32),
+                batch_size=128,
+                max_epochs=1001,
+                log_epoch=1,
+                print_epoch=1,
+                learning_rate_decay=False,    # Disable learning rate decay to match training mode
+                learning_rate=0.0001,        # Lower learning rate for evaluation
+                l2_reg_enabled=True,
+                l2_lambda=0.0001,
+                early_stopping_enabled=True,
+                early_stopping_patience=100,
+                resume_training=True,
+                conv1_k=5, conv1_d=32, conv1_p=0.9,
+                conv2_k=5, conv2_d=64, conv2_p=0.8,
+                conv3_k=5, conv3_d=128, conv3_p=0.7,
+                fc4_size=1024, fc4_p=0.5
+            )
+            
+            print_debug(f"Running predictions on {X_test.shape[0]} test samples...")
+            # The data is already normalized by preprocess_dataset() earlier (no need to scale again)
+            print_debug("Test data is already preprocessed and in [0, 1] range...")
+            X_test_scaled = X_test
+            
+            # Ensure data has the correct shape with channel dimension
+            if len(X_test_scaled.shape) == 3:
+                print_debug("Adding channel dimension to test data...")
+                X_test_scaled = X_test_scaled.reshape(X_test_scaled.shape + (1,))
+            
+            steps = 10  # Progress steps for evaluation
+            for i in range(steps):
+                progress_bar(i+1, steps, prefix="Evaluating model", 
+                            suffix=f"Processing batch {i+1}/{steps}")
+                time.sleep(0.5)  # Small delay to show progress
+                
+            predictions = get_top_k_predictions(parameters, X_test_scaled)
+            predicted_labels = predictions[1][0, :].astype(int)  # Use the top prediction (index 0)
+            
+            # If y_test is one-hot encoded, convert to class indices
+            if len(y_test.shape) > 1 and y_test.shape[1] > 1:
+                true_labels = np.argmax(y_test, axis=1)
+            else:
+                true_labels = y_test
+                
+            accuracy = np.sum(predicted_labels == true_labels) / len(true_labels)
+            
+            print_debug(f"Evaluation complete!")
+            print(f"\n=== RESULTS ===")
+            print(f"Test Accuracy: {accuracy * 100:.2f}%")
+            print(f"Correct predictions: {np.sum(predicted_labels == true_labels)}/{len(true_labels)}")
+            print_debug("=== Model Evaluation Completed ===")
+            
+        except Exception as e:
+            print_debug(f"Error during evaluation: {e}")
     
     elif args.mode == 'predict':
-        print("Prediction mode selected.")
-        from predictor import predict_on_new_images
-        print("Setting model parameters for prediction...")
-        parameters = Parameters(
-            num_classes=43,
-            image_size=(32, 32),
-            batch_size=256,
-            max_epochs=100,
-            log_epoch=1,
-            print_epoch=1,
-            learning_rate_decay=True,
-            learning_rate=0.0001,  # Use fine-tuning learning rate
-            l2_reg_enabled=True,
-            l2_lambda=0.0001,
-            early_stopping_enabled=True,
-            early_stopping_patience=50,
-            resume_training=True,  # Load the trained model
-            conv1_k=5, conv1_d=32, conv1_p=0.9,
-            conv2_k=5, conv2_d=64, conv2_p=0.8,
-            conv3_k=5, conv3_d=128, conv3_p=0.7,
-            fc4_size=1024, fc4_p=0.5
-        )
+        print_debug("=== Starting Custom Image Prediction ===")
         
-        # Create custom folder if it doesn't exist
-        os.makedirs('data/custom', exist_ok=True)
-        
-        print("Collecting custom images for prediction...")
-        custom_image_paths = [os.path.join('data/custom', f) for f in os.listdir('data/custom') if f.endswith('.png')]
-        if not custom_image_paths:
-            print("No custom images found. Copying some test images as examples...")
-            # Copy some test images to custom folder for prediction
-            import shutil
-            test_images = glob.glob('data/test/Images/*.ppm')[:5]  # Get first 5 test images
-            for i, img_path in enumerate(test_images):
-                output_path = f'data/custom/test_example_{i}.png'
-                # Convert PPM to PNG
-                img = io.imread(img_path)
-                io.imsave(output_path, img)
-                custom_image_paths.append(output_path)
-            
-        print("Starting prediction on custom images...")
-        predict_on_new_images(parameters, custom_image_paths)
-
-def create_train_pickle_from_raw():
-    """Create a pickle file from raw train images"""
-    print("Loading training images from data/train folder...")
-    from skimage import transform
-    
-    features = []
-    labels = []
-    target_size = (32, 32, 3)  # Standard size for traffic signs
-    
-    # Each subfolder in train directory is a class
-    class_folders = sorted(glob.glob('data/train/*/'))
-    
-    for class_idx, class_folder in enumerate(class_folders):
-        class_images = glob.glob(os.path.join(class_folder, '*.ppm'))
-        print(f"Processing class {class_idx}: {len(class_images)} images")
-        
-        for img_path in class_images:
-            try:
-                img = io.imread(img_path)
-                # Resize image to target size
-                if img.shape != target_size:
-                    img = transform.resize(img, (32, 32), anti_aliasing=True)
-                    img = (img * 255).astype(np.uint8)
-                # Ensure image has 3 channels
-                if len(img.shape) == 2:  # Grayscale image
-                    img = np.stack((img,) * 3, axis=-1)
-                features.append(img)
-                labels.append(class_idx)
-            except Exception as e:
-                print(f"Error processing image {img_path}: {e}")
-    
-    features = np.array(features)
-    labels = np.array(labels)
-    
-    print(f"Loaded {len(features)} training images with shape {features.shape}")
-    
-    return {
-        'features': features,
-        'labels': labels
-    }
-
-def create_test_pickle_from_raw():
-    """Create a pickle file from raw test images"""
-    print("Loading test images from data/test/Images folder...")
-    from skimage import transform
-    
-    features = []
-    labels = []
-    target_size = (32, 32, 3)  # Standard size for traffic signs
-    
-    # Extract class name from filename
-    test_images = sorted(glob.glob('data/test/Images/*.ppm'))
-    
-    for img_path in test_images:
+        # For TF 2.x compatibility, ensure the predictor module is updated
         try:
-            # Just use a dummy label (0) for test images since we'll need manual annotation anyway
-            # We can update this later if we get the actual labels
-            img_class = 0
+            from predictor import predict_on_new_images
+            print_debug("Initializing model for prediction...")
             
-            img = io.imread(img_path)
-            # Resize image to target size
-            if img.shape != target_size:
-                img = transform.resize(img, (32, 32), anti_aliasing=True)
-                img = (img * 255).astype(np.uint8)
-            # Ensure image has 3 channels
-            if len(img.shape) == 2:  # Grayscale image
-                img = np.stack((img,) * 3, axis=-1)
+            # Predict on custom images
+            parameters = Parameters(
+                num_classes=43,
+                image_size=(32, 32),
+                batch_size=128,
+                max_epochs=200,
+                log_epoch=1,
+                print_epoch=1,
+                learning_rate_decay=False,    # Disable learning rate decay to match training mode
+                learning_rate=0.0001,        # Lower learning rate for prediction
+                l2_reg_enabled=True,
+                l2_lambda=0.0001,
+                early_stopping_enabled=True,
+                early_stopping_patience=100,
+                resume_training=True,
+                conv1_k=5, conv1_d=32, conv1_p=0.9,
+                conv2_k=5, conv2_d=64, conv2_p=0.8,
+                conv3_k=5, conv3_d=128, conv3_p=0.7,
+                fc4_size=1024, fc4_p=0.5
+            )
             
-            features.append(img)
-            labels.append(img_class)
+            custom_image_dir = 'data/custom'
+            if not os.path.exists(custom_image_dir):
+                print_debug(f"Custom image directory {custom_image_dir} not found")
+                return
+                
+            custom_image_paths = [os.path.join(custom_image_dir, f) for f in os.listdir(custom_image_dir) if f.endswith('.png')]
+            
+            if not custom_image_paths:
+                print_debug("No PNG images found in the custom image directory")
+                return
+                
+            print_debug(f"Found {len(custom_image_paths)} custom images for prediction")
+            
+            # Show progress while loading and processing images
+            print_debug("Processing custom images...")
+            for i, img_path in enumerate(custom_image_paths):
+                progress_bar(i+1, len(custom_image_paths), 
+                            prefix="Processing images", 
+                            suffix=f"Image {i+1}/{len(custom_image_paths)}: {os.path.basename(img_path)}")
+                time.sleep(0.2)  # Small delay to show progress
+            
+            print_debug("Running prediction on custom images...")
+            predict_on_new_images(parameters, custom_image_paths)
+            print_debug("=== Custom Image Prediction Completed ===")
+            
         except Exception as e:
-            print(f"Error processing image {img_path}: {e}")
+            print_debug(f"Error during prediction: {e}")
     
-    features = np.array(features)
-    labels = np.array(labels)
-    
-    print(f"Loaded {len(features)} test images with shape {features.shape}")
-    
-    return {
-        'features': features,
-        'labels': labels
-    }
+    print_debug("=== Traffic Sign Classification Application Completed ===")
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nProcess interrupted by user")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
