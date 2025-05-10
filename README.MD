@@ -106,7 +106,7 @@ The following chart shows the model's learning curves during training:
 ![Learning Curves](learning_curves.png)
 ![L2 Comparison Results](l2_comparison_results.png)
 
-*Left: Model accuracy for training and validation sets. Right: Model loss on logarithmic scale.*
+*Left: Model loss on logarithmic scale. Right: Model accuracy for training and validation sets.*
 
 ### Predicting on New Images
 
