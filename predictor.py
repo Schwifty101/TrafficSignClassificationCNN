@@ -48,29 +48,9 @@ def predict_on_new_images(params, image_paths):
     X_custom, _ = preprocess_dataset(X_custom)
     print(f"After preprocessing: dtype={X_custom.dtype}, min={X_custom.min()}, max={X_custom.max()}")
     
-    # Ensure data has the correct channel dimension
-    print(f"X_custom shape before checking channel dimension: {X_custom.shape}")
-    if len(X_custom.shape) == 3:
-        print(f"Adding channel dimension to custom images")
-        X_custom = X_custom.reshape(X_custom.shape + (1,))
-    
-    # Make sure we have exactly 1 channel (grayscale) for model input
-    if X_custom.shape[3] != 1:
-        print(f"Unexpected channel count: {X_custom.shape[3]}, reshaping to single channel")
-        if X_custom.shape[3] == 3:
-            # Convert RGB to grayscale
-            print("Converting RGB to grayscale")
-            grayscale = 0.299 * X_custom[:, :, :, 0] + 0.587 * X_custom[:, :, :, 1] + 0.114 * X_custom[:, :, :, 2]
-            X_custom = grayscale.reshape(grayscale.shape + (1,))
-        else:
-            # Just take the first channel
-            X_custom = X_custom[:, :, :, 0:1]
-    
+    # preprocess_dataset already ensures the correct shape (samples, 32, 32, 1)
     print(f"X_custom final shape: {X_custom.shape}")
     print(f"X_custom data range: [{X_custom.min():.6f}, {X_custom.max():.6f}]")
-    
-    # Create y_custom for actual class labels
-    y_custom = np.array(range(len(image_paths)))  # Fix missing y_custom definition
     
     # Get predictions
     predictions = get_top_k_predictions(params, X_custom)
@@ -80,17 +60,9 @@ def predict_on_new_images(params, image_paths):
         plot_image_statistics(predictions, i, image_paths[i], sign_names, X_custom)
         print("---------------------------------------------------------------------------------------------------\n")
     
-    # Filter valid classes (< 99)
-    valid_indices = y_custom < 99
-    X_custom_valid = X_custom[valid_indices]
-    y_custom_valid = y_custom[valid_indices]
-    
-    # Only calculate accuracy if we have valid classes
-    if len(X_custom_valid) > 0:
-        y_custom_onehot = tf.one_hot(y_custom_valid, 43).numpy()  # Using TF 2.x one_hot
-        predictions_valid = get_top_k_predictions(params, X_custom_valid)[1][:, 0]
-        accuracy = 100.0 * np.sum(predictions_valid == np.argmax(y_custom_onehot, 1)) / predictions_valid.shape[0]
-        print(f"Accuracy on captured images: {accuracy:.2f}%")
+    # Note: We're not calculating accuracy here because we don't have ground truth labels for the custom images.
+    # The model is simply providing its best prediction for each image.
+    print("Note: No accuracy calculation is provided for custom images as ground truth labels are unknown.")
 
 def plot_image_statistics(predictions, index, image_path, sign_names, X_custom):
     """
@@ -151,7 +123,7 @@ def get_top_k_predictions(params, X, k=5):
     
     try:
         # First attempt: Try loading as a full Keras model
-        model = tf.keras.models.load_model(paths.root_path)
+        model = tf.keras.models.load_model(paths.model_path)
         print("Loaded full Keras model successfully")
     except Exception as e:
         print(f"Could not load full Keras model: {e}")

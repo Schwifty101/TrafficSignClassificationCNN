@@ -22,10 +22,10 @@ This script handles the complete pipeline for traffic sign recognition:
    - Limits dataset size to exactly 2x the original size
    - Ensures all classes have balanced representation
 3. Model training
-4. Evaluation and prediction
+4. Prediction
 
 Command-line arguments:
-  --mode: 'train', 'evaluate', or 'predict'
+  --mode: 'train' or 'predict'
   --config: Path to configuration file (default: config.json)
   --rebuild-datasets: Force rebuild of processed datasets
 """
@@ -54,7 +54,7 @@ def main():
     print_debug("=== Starting Traffic Sign Classification Application ===")
     
     parser = argparse.ArgumentParser(description='Traffic Sign Classification')
-    parser.add_argument('--mode', choices=['train', 'evaluate', 'predict'], default='train')
+    parser.add_argument('--mode', choices=['train', 'predict'], default='train')
     parser.add_argument('--config', default='config.json')
     parser.add_argument('--rebuild-datasets', action='store_true', help='Force rebuild of processed datasets')
     args = parser.parse_args()
@@ -120,7 +120,35 @@ def main():
     current_step += 1
     print_debug(f"Preprocessing step {current_step}/{total_steps}: Creating balanced dataset")
     if os.path.exists('data/train_balanced.p'):
-        print_debug("Balanced dataset already exists, skipping creation")
+        print_debug("Balanced dataset already exists, loading for verification...")
+        X_train_balanced_check, y_train_balanced_check = load_pickled_data('data/train_balanced.p', ['features', 'labels'])
+        
+        # Verify class distribution
+        print_debug("Verifying class distribution in existing balanced dataset...")
+        # Check if labels are one-hot encoded or single integers
+        if len(y_train_balanced_check.shape) > 1 and y_train_balanced_check.shape[1] > 1:
+            # One-hot encoded format
+            class_counts = np.array([np.sum(np.argmax(y_train_balanced_check, axis=1) == c) for c in range(43)])
+        else:
+            # Single label format
+            class_counts = np.array([np.sum(y_train_balanced_check == c) for c in range(43)])
+        
+        # Calculate average count and check if samples are within 10% of target
+        avg_count = np.mean(class_counts)
+        tolerance = 0.1  # 10% tolerance
+        classes_within_tolerance = np.sum((class_counts >= avg_count * (1 - tolerance)) & 
+                                        (class_counts <= avg_count * (1 + tolerance)))
+        
+        print_debug(f"Class distribution stats for existing balanced dataset:")
+        print_debug(f"  - Total samples: {len(X_train_balanced_check)}")
+        print_debug(f"  - Average samples per class: {avg_count:.1f}")
+        print_debug(f"  - Min samples: {np.min(class_counts)} (Class {np.argmin(class_counts)})")
+        print_debug(f"  - Max samples: {np.max(class_counts)} (Class {np.argmax(class_counts)})")
+        print_debug(f"  - Classes within 10% of average: {classes_within_tolerance}/43 ({classes_within_tolerance/43*100:.1f}%)")
+        
+        # Print warning if distribution is significantly unbalanced
+        if classes_within_tolerance < 39:  # If less than 90% of classes are within tolerance
+            print_debug("WARNING: Existing dataset balance may not be optimal. Consider using --rebuild-datasets flag.")
     else:
         print_debug("Creating balanced dataset (this may take a while)...")
         steps = 43  # One for each class
@@ -145,6 +173,32 @@ def main():
         
         # After creating balanced dataset, print its size
         print_debug(f"Balanced training data size: {len(X_train_balanced)} samples")
+        
+        # Verify class distribution
+        print_debug("Verifying class distribution in balanced dataset...")
+        # Check if labels are one-hot encoded or single integers
+        if len(y_train_balanced.shape) > 1 and y_train_balanced.shape[1] > 1:
+            # One-hot encoded format
+            class_counts = np.array([np.sum(np.argmax(y_train_balanced, axis=1) == c) for c in range(43)])
+        else:
+            # Single label format
+            class_counts = np.array([np.sum(y_train_balanced == c) for c in range(43)])
+        
+        # Calculate average count and check if samples are within 10% of target
+        avg_count = np.mean(class_counts)
+        tolerance = 0.1  # 10% tolerance
+        classes_within_tolerance = np.sum((class_counts >= avg_count * (1 - tolerance)) & 
+                                        (class_counts <= avg_count * (1 + tolerance)))
+        
+        print_debug(f"Class distribution stats:")
+        print_debug(f"  - Average samples per class: {avg_count:.1f}")
+        print_debug(f"  - Min samples: {np.min(class_counts)} (Class {np.argmin(class_counts)})")
+        print_debug(f"  - Max samples: {np.max(class_counts)} (Class {np.argmax(class_counts)})")
+        print_debug(f"  - Classes within 10% of average: {classes_within_tolerance}/43 ({classes_within_tolerance/43*100:.1f}%)")
+        
+        # Print warning if distribution is significantly unbalanced
+        if classes_within_tolerance < 39:  # If less than 90% of classes are within tolerance
+            print_debug("WARNING: Dataset balance may not be optimal. Consider adjusting balancing parameters.")
     
     # Step 4: Create extended dataset
     current_step += 1
@@ -234,123 +288,6 @@ def main():
         # Train the model with TF 2.x compatible function
         model = train_model(parameters, X_train, y_train, X_valid, y_valid, X_test, y_test, config.get("logger_config"))
         print_debug("=== Model Training Completed ===")
-    
-    elif args.mode == 'evaluate':
-        print_debug("=== Starting Model Evaluation ===")
-        
-        # For TF 2.x compatibility, ensure the evaluator module is updated
-        try:
-            from evaluator import get_top_k_predictions
-            print_debug("Initializing model for evaluation...")
-            
-            # Evaluate the model on test set
-            parameters = Parameters(
-                num_classes=43,
-                image_size=(32, 32),
-                batch_size=128,
-                max_epochs=1001,
-                log_epoch=1,
-                print_epoch=1,
-                learning_rate_decay=False,    # Disable learning rate decay to match training mode
-                learning_rate=0.0001,        # Lower learning rate for evaluation
-                l2_reg_enabled=True,
-                l2_lambda=0.0001,
-                early_stopping_enabled=True,
-                early_stopping_patience=100,
-                resume_training=True,
-                conv1_k=5, conv1_d=32, conv1_p=0.9,
-                conv2_k=5, conv2_d=64, conv2_p=0.8,
-                conv3_k=5, conv3_d=128, conv3_p=0.7,
-                fc4_size=1024, fc4_p=0.5
-            )
-            
-            print_debug(f"Running predictions on {X_test.shape[0]} test samples...")
-            # The data is already normalized by preprocess_dataset() earlier (no need to scale again)
-            print_debug("Test data is already preprocessed and in [0, 1] range...")
-            X_test_scaled = X_test
-            
-            # Ensure data has the correct shape with channel dimension
-            print_debug(f"X_test_scaled shape before ensuring channel dimension: {X_test_scaled.shape}")
-            if len(X_test_scaled.shape) == 3:
-                print_debug("Adding channel dimension to test data...")
-                X_test_scaled = X_test_scaled.reshape(X_test_scaled.shape + (1,))
-            
-            # Make sure we have exactly 1 channel (grayscale) for model input
-            if X_test_scaled.shape[3] != 1:
-                print_debug(f"Unexpected channel count: {X_test_scaled.shape[3]}, reshaping to single channel")
-                if X_test_scaled.shape[3] == 3:
-                    # Convert RGB to grayscale
-                    print_debug("Converting RGB to grayscale")
-                    grayscale = 0.299 * X_test_scaled[:, :, :, 0] + 0.587 * X_test_scaled[:, :, :, 1] + 0.114 * X_test_scaled[:, :, :, 2]
-                    X_test_scaled = grayscale.reshape(grayscale.shape + (1,))
-                else:
-                    # Just take the first channel
-                    X_test_scaled = X_test_scaled[:, :, :, 0:1]
-            
-            print_debug(f"X_test_scaled shape after ensuring channel dimension: {X_test_scaled.shape}")
-            print_debug(f"X_test_scaled data range: [{X_test_scaled.min():.6f}, {X_test_scaled.max():.6f}]")
-            
-            steps = 10  # Progress steps for evaluation
-            for i in range(steps):
-                progress_bar(i+1, steps, prefix="Evaluating model", 
-                            suffix=f"Processing batch {i+1}/{steps}")
-                time.sleep(0.5)  # Small delay to show progress
-                
-            predictions = get_top_k_predictions(parameters, X_test_scaled)
-            # predictions is a tuple of (values, indices) where indices[0, :] contains the top prediction for each sample
-            predicted_labels = predictions[1][0, :].astype(int)  # Use the top prediction (index 0)
-            
-            print_debug(f"Predicted labels shape: {predicted_labels.shape}")
-            print_debug(f"First 10 predicted labels: {predicted_labels[:10]}")
-            
-            # If y_test is one-hot encoded, convert to class indices
-            if len(y_test.shape) > 1 and y_test.shape[1] > 1:
-                true_labels = np.argmax(y_test, axis=1)
-            else:
-                # Ensure true_labels has the same shape as predicted_labels
-                true_labels = y_test.reshape(-1)
-                
-            print_debug(f"True labels shape: {true_labels.shape}")
-            print_debug(f"First 10 true labels: {true_labels[:10]}")
-            
-            # Since this is a test set without real labels, this accuracy isn't meaningful
-            # In a real evaluation, you would have ground truth labels
-            # For this demo, we're just checking that the shapes match
-            matches = None
-            total = None
-            if true_labels.shape == predicted_labels.shape:
-                matches = np.sum(predicted_labels == true_labels)
-                total = len(true_labels)
-                accuracy = matches / total
-                print_debug(f"Shapes match: predicted {predicted_labels.shape}, true {true_labels.shape}")
-            else:
-                print_debug(f"Shape mismatch: predicted {predicted_labels.shape}, true {true_labels.shape}")
-                # Try to reshape the arrays to make them compatible
-                try:
-                    if len(true_labels.shape) > 1:
-                        true_labels = true_labels.reshape(-1)
-                    if len(predicted_labels.shape) > 1:
-                        predicted_labels = predicted_labels.reshape(-1)
-                    
-                    matches = np.sum(predicted_labels == true_labels)
-                    total = len(true_labels)
-                    accuracy = matches / total
-                    print_debug(f"After reshaping: predicted {predicted_labels.shape}, true {true_labels.shape}")
-                except Exception as e:
-                    print_debug(f"Reshaping failed: {e}")
-                    accuracy = 0  # Invalid accuracy due to incompatible shapes
-            
-            print_debug(f"Evaluation complete!")
-            print(f"\n=== RESULTS ===")
-            print(f"Test Accuracy: {accuracy * 100:.2f}%")
-            if matches is not None and total is not None:
-                print(f"Correct predictions: {matches}/{total}")
-            else:
-                print(f"Could not calculate correct predictions due to shape mismatch")
-            print_debug("=== Model Evaluation Completed ===")
-            
-        except Exception as e:
-            print_debug(f"Error during evaluation: {e}")
     
     elif args.mode == 'predict':
         print_debug("=== Starting Custom Image Prediction ===")

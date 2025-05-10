@@ -100,8 +100,14 @@ def preprocess_dataset(X, y=None):
         X = X.reshape(X.shape + (1,))
     
     # Scale features to be in [0, 1]
-    print_debug("Scaling features to [0, 1] range...")
-    X = (X / 255.).astype(np.float32)
+    # Check if data is already in [0, 1] range
+    if X.max() > 1.0:
+        print_debug("Scaling features to [0, 1] range...")
+        X = (X / 255.).astype(np.float32)
+    else:
+        print_debug("Data already in [0, 1] range, skipping scaling...")
+        # Ensure data type is float32 without scaling
+        X = X.astype(np.float32)
     
     # Apply histogram equalization with progress tracking
     print_debug("Applying adaptive histogram equalization...")
