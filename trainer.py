@@ -96,8 +96,8 @@ class ModelLogger:
         self(" %-10s %-10s %-8s %-15s" % ("Layer 4", "FC", str(params.fc4_size), str(params.fc4_p)))
         self("---------------- PARAMETERS -----------------")
         self(f" Learning rate decay: {'Enabled' if params.learning_rate_decay else f'Disabled (rate = {params.learning_rate})'}")
-        self(f" L2 Regularization: {'Enabled (lambda = {params.l2_lambda})' if params.l2_reg_enabled else 'Disabled'}")
-        self(f" Early stopping: {'Enabled (patience = {params.early_stopping_patience})' if params.early_stopping_enabled else 'Disabled'}")
+        self(f" L2 Regularization: {'Enabled (lambda = ' + str(params.l2_lambda) + ')' if params.l2_reg_enabled else 'Disabled'}")
+        self(f" Early stopping: {'Enabled (patience = ' + str(params.early_stopping_patience) + ')' if params.early_stopping_enabled else 'Disabled'}")
         self(f" Keep training old model: {'Enabled' if params.resume_training else 'Disabled'}")
 
 def progress_bar(current, total, bar_length=50, prefix='', suffix=''):
@@ -145,18 +145,21 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
         # Convert existing model_pass function to explicit layer definitions
         # Layer 1: Convolutional + MaxPooling
         model.add(tf.keras.layers.Conv2D(params.conv1_d, (params.conv1_k, params.conv1_k), activation='relu', padding='same', 
+                                         kernel_regularizer=tf.keras.regularizers.l2(params.l2_lambda) if params.l2_reg_enabled else None,
                                          name='conv1'))
         model.add(tf.keras.layers.MaxPooling2D(pool_size=(2, 2), name='pool1'))
         model.add(tf.keras.layers.Dropout(1 - params.conv1_p, name='dropout1'))
         
         # Layer 2: Convolutional + MaxPooling
         model.add(tf.keras.layers.Conv2D(params.conv2_d, (params.conv2_k, params.conv2_k), activation='relu', padding='same',
+                                         kernel_regularizer=tf.keras.regularizers.l2(params.l2_lambda) if params.l2_reg_enabled else None,
                                          name='conv2'))
         model.add(tf.keras.layers.MaxPooling2D(pool_size=(2, 2), name='pool2'))
         model.add(tf.keras.layers.Dropout(1 - params.conv2_p, name='dropout2'))
         
         # Layer 3: Convolutional + MaxPooling
         model.add(tf.keras.layers.Conv2D(params.conv3_d, (params.conv3_k, params.conv3_k), activation='relu', padding='same',
+                                         kernel_regularizer=tf.keras.regularizers.l2(params.l2_lambda) if params.l2_reg_enabled else None,
                                          name='conv3'))
         model.add(tf.keras.layers.MaxPooling2D(pool_size=(2, 2), name='pool3'))
         model.add(tf.keras.layers.Dropout(1 - params.conv3_p, name='dropout3'))
@@ -167,7 +170,9 @@ def train_model(params, X_train, y_train, X_valid, y_valid, X_test, y_test, logg
                                         kernel_regularizer=tf.keras.regularizers.l2(params.l2_lambda) if params.l2_reg_enabled else None,
                                         name='fc4'))
         model.add(tf.keras.layers.Dropout(1 - params.fc4_p, name='dropout4'))
-        model.add(tf.keras.layers.Dense(params.num_classes, activation='softmax', name='output'))
+        model.add(tf.keras.layers.Dense(params.num_classes, activation='softmax', 
+                                         kernel_regularizer=tf.keras.regularizers.l2(params.l2_lambda) if params.l2_reg_enabled else None,
+                                         name='output'))
         
         # Print model summary for debugging
         model.summary()
