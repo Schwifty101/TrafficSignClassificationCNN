@@ -49,9 +49,25 @@ def predict_on_new_images(params, image_paths):
     print(f"After preprocessing: dtype={X_custom.dtype}, min={X_custom.min()}, max={X_custom.max()}")
     
     # Ensure data has the correct channel dimension
+    print(f"X_custom shape before checking channel dimension: {X_custom.shape}")
     if len(X_custom.shape) == 3:
-        print(f"Adding channel dimension to custom images: {X_custom.shape}")
+        print(f"Adding channel dimension to custom images")
         X_custom = X_custom.reshape(X_custom.shape + (1,))
+    
+    # Make sure we have exactly 1 channel (grayscale) for model input
+    if X_custom.shape[3] != 1:
+        print(f"Unexpected channel count: {X_custom.shape[3]}, reshaping to single channel")
+        if X_custom.shape[3] == 3:
+            # Convert RGB to grayscale
+            print("Converting RGB to grayscale")
+            grayscale = 0.299 * X_custom[:, :, :, 0] + 0.587 * X_custom[:, :, :, 1] + 0.114 * X_custom[:, :, :, 2]
+            X_custom = grayscale.reshape(grayscale.shape + (1,))
+        else:
+            # Just take the first channel
+            X_custom = X_custom[:, :, :, 0:1]
+    
+    print(f"X_custom final shape: {X_custom.shape}")
+    print(f"X_custom data range: [{X_custom.min():.6f}, {X_custom.max():.6f}]")
     
     # Create y_custom for actual class labels
     y_custom = np.array(range(len(image_paths)))  # Fix missing y_custom definition
@@ -87,7 +103,17 @@ def plot_image_statistics(predictions, index, image_path, sign_names, X_custom):
         X_custom: preprocessed images
     """
     original = io.imread(image_path)
-    preprocessed = X_custom[index].reshape(32, 32)
+    
+    # Extract the preprocessed image correctly - X_custom has shape (samples, height, width, channels)
+    if X_custom.shape[3] == 1:
+        # Get the single channel for display
+        preprocessed = X_custom[index, :, :, 0]
+    else:
+        # Just in case there are multiple channels
+        preprocessed = X_custom[index]
+        if len(preprocessed.shape) > 2:
+            # Take first channel for display
+            preprocessed = preprocessed[:, :, 0]
     
     plt.figure(figsize=(6, 2))
     plt.subplot2grid((2, 2), (0, 0), colspan=1, rowspan=1)

@@ -270,9 +270,25 @@ def main():
             X_test_scaled = X_test
             
             # Ensure data has the correct shape with channel dimension
+            print_debug(f"X_test_scaled shape before ensuring channel dimension: {X_test_scaled.shape}")
             if len(X_test_scaled.shape) == 3:
                 print_debug("Adding channel dimension to test data...")
                 X_test_scaled = X_test_scaled.reshape(X_test_scaled.shape + (1,))
+            
+            # Make sure we have exactly 1 channel (grayscale) for model input
+            if X_test_scaled.shape[3] != 1:
+                print_debug(f"Unexpected channel count: {X_test_scaled.shape[3]}, reshaping to single channel")
+                if X_test_scaled.shape[3] == 3:
+                    # Convert RGB to grayscale
+                    print_debug("Converting RGB to grayscale")
+                    grayscale = 0.299 * X_test_scaled[:, :, :, 0] + 0.587 * X_test_scaled[:, :, :, 1] + 0.114 * X_test_scaled[:, :, :, 2]
+                    X_test_scaled = grayscale.reshape(grayscale.shape + (1,))
+                else:
+                    # Just take the first channel
+                    X_test_scaled = X_test_scaled[:, :, :, 0:1]
+            
+            print_debug(f"X_test_scaled shape after ensuring channel dimension: {X_test_scaled.shape}")
+            print_debug(f"X_test_scaled data range: [{X_test_scaled.min():.6f}, {X_test_scaled.max():.6f}]")
             
             steps = 10  # Progress steps for evaluation
             for i in range(steps):
@@ -281,20 +297,56 @@ def main():
                 time.sleep(0.5)  # Small delay to show progress
                 
             predictions = get_top_k_predictions(parameters, X_test_scaled)
+            # predictions is a tuple of (values, indices) where indices[0, :] contains the top prediction for each sample
             predicted_labels = predictions[1][0, :].astype(int)  # Use the top prediction (index 0)
+            
+            print_debug(f"Predicted labels shape: {predicted_labels.shape}")
+            print_debug(f"First 10 predicted labels: {predicted_labels[:10]}")
             
             # If y_test is one-hot encoded, convert to class indices
             if len(y_test.shape) > 1 and y_test.shape[1] > 1:
                 true_labels = np.argmax(y_test, axis=1)
             else:
-                true_labels = y_test
+                # Ensure true_labels has the same shape as predicted_labels
+                true_labels = y_test.reshape(-1)
                 
-            accuracy = np.sum(predicted_labels == true_labels) / len(true_labels)
+            print_debug(f"True labels shape: {true_labels.shape}")
+            print_debug(f"First 10 true labels: {true_labels[:10]}")
+            
+            # Since this is a test set without real labels, this accuracy isn't meaningful
+            # In a real evaluation, you would have ground truth labels
+            # For this demo, we're just checking that the shapes match
+            matches = None
+            total = None
+            if true_labels.shape == predicted_labels.shape:
+                matches = np.sum(predicted_labels == true_labels)
+                total = len(true_labels)
+                accuracy = matches / total
+                print_debug(f"Shapes match: predicted {predicted_labels.shape}, true {true_labels.shape}")
+            else:
+                print_debug(f"Shape mismatch: predicted {predicted_labels.shape}, true {true_labels.shape}")
+                # Try to reshape the arrays to make them compatible
+                try:
+                    if len(true_labels.shape) > 1:
+                        true_labels = true_labels.reshape(-1)
+                    if len(predicted_labels.shape) > 1:
+                        predicted_labels = predicted_labels.reshape(-1)
+                    
+                    matches = np.sum(predicted_labels == true_labels)
+                    total = len(true_labels)
+                    accuracy = matches / total
+                    print_debug(f"After reshaping: predicted {predicted_labels.shape}, true {true_labels.shape}")
+                except Exception as e:
+                    print_debug(f"Reshaping failed: {e}")
+                    accuracy = 0  # Invalid accuracy due to incompatible shapes
             
             print_debug(f"Evaluation complete!")
             print(f"\n=== RESULTS ===")
             print(f"Test Accuracy: {accuracy * 100:.2f}%")
-            print(f"Correct predictions: {np.sum(predicted_labels == true_labels)}/{len(true_labels)}")
+            if matches is not None and total is not None:
+                print(f"Correct predictions: {matches}/{total}")
+            else:
+                print(f"Could not calculate correct predictions due to shape mismatch")
             print_debug("=== Model Evaluation Completed ===")
             
         except Exception as e:

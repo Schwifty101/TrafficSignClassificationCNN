@@ -38,18 +38,18 @@ def preprocess_dataset(X, y=None):
     print_debug(f"Preprocessing dataset with {X.shape[0]} examples")
     start_time = time.time()
     
-    # Check if input data has correct shape
+    # Check if input data has correct shape - we always want (samples, height, width, channels)
     if len(X.shape) != 4:
         print_debug(f"Warning: Expected 4D input (batch, height, width, channels), got shape {X.shape}")
         if len(X.shape) == 3:
-            # Assume this is a single-channel grayscale
-            print_debug("Assuming single-channel grayscale image, adding channel dimension")
+            # Assume this is a single-channel grayscale or RGB without channel dimension
+            print_debug("Adding channel dimension")
             X = X.reshape(X.shape + (1,))
     
     # Convert to grayscale (TF 2.x compatible method)
     print_debug("Converting to grayscale...")
     try:
-        # TensorFlow 2.x approach to grayscale conversion
+        # Ensure we're working with float32
         if X.dtype != np.float32:
             X = X.astype(np.float32)
         
@@ -64,8 +64,10 @@ def preprocess_dataset(X, y=None):
                 end_idx = min(batch_idx + batch_size, total_examples)
                 batch = X[batch_idx:end_idx]
                 
-                # Convert batch to grayscale
+                # Convert batch to grayscale and keep the channel dimension
                 grayscale_batch = 0.299 * batch[:, :, :, 0] + 0.587 * batch[:, :, :, 1] + 0.114 * batch[:, :, :, 2]
+                # Reshape to include channel dimension
+                grayscale_batch = grayscale_batch.reshape(grayscale_batch.shape + (1,))
                 processed_images.append(grayscale_batch)
                 
                 # Show progress
@@ -77,31 +79,40 @@ def preprocess_dataset(X, y=None):
             X = np.concatenate(processed_images, axis=0)
             print_debug(f"Grayscale conversion completed in {time.time() - start_time:.2f}s")
         else:
-            print_debug(f"Input already has {X.shape[3]} channels, skipping grayscale conversion")
-            # For single-channel input, just extract the channel
-            if X.shape[3] == 1:
-                X = X[:, :, :, 0]
+            print_debug(f"Input already has {X.shape[3]} channels, ensuring single-channel grayscale format")
+            # Ensure we keep the channel dimension
+            if X.shape[3] != 1:
+                print_debug(f"Unexpected channel count: {X.shape[3]}, reshaping to single channel")
+                # Reshape to ensure single channel
+                X = X.reshape((X.shape[0], X.shape[1], X.shape[2], 1))
     except Exception as e:
         print_debug(f"Error during grayscale conversion: {e}")
         # Fallback to original method
         if X.shape[3] == 3:
             X = 0.299 * X[:, :, :, 0] + 0.587 * X[:, :, :, 1] + 0.114 * X[:, :, :, 2]
+            # Make sure to keep channel dimension
+            X = X.reshape(X.shape + (1,))
     
-    # Add the channel dimension first (required for equalize_adapthist to work correctly)
-    print_debug("Reshaping grayscale images to include channel dimension...")
-    X = X.reshape(X.shape + (1,))
+    # Ensure we have a channel dimension before proceeding
+    print_debug(f"Current shape after grayscale conversion: {X.shape}")
+    if len(X.shape) != 4:
+        print_debug("Adding channel dimension for consistent processing")
+        X = X.reshape(X.shape + (1,))
     
     # Scale features to be in [0, 1]
     print_debug("Scaling features to [0, 1] range...")
     X = (X / 255.).astype(np.float32)
     
-    # Apply histogram equalization with progress tracking - reshape to remove channel for equalize_adapthist
+    # Apply histogram equalization with progress tracking
     print_debug("Applying adaptive histogram equalization...")
+    print_debug(f"Shape before equalization: {X.shape}")
     equalize_start = time.time()
+    
+    # Process each image while maintaining channel dimension
     for i in range(X.shape[0]):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # Extract and equalize the 2D image (removing channel dimension)
+            # Apply equalize_adapthist to the 2D image but keep channel dimension
             X[i, :, :, 0] = exposure.equalize_adapthist(X[i, :, :, 0])
         
         # Update progress every 50 images or at the end
@@ -110,6 +121,7 @@ def preprocess_dataset(X, y=None):
                         prefix="Histogram equalization", 
                         suffix=f"Processed {i+1}/{X.shape[0]} images")
     
+    print_debug(f"Shape after equalization: {X.shape}")
     print_debug(f"Histogram equalization completed in {time.time() - equalize_start:.2f}s")
     
     if y is not None:
