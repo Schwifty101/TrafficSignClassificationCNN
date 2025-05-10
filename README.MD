@@ -3,13 +3,14 @@
 
 This project implements a **Convolutional Neural Network (CNN)** to classify traffic signs from the **German Traffic Sign Recognition Benchmark (GTSRB)** dataset. The model is designed to recognize 43 traffic sign classes with high accuracy, leveraging data preprocessing, augmentation, and advanced training techniques.
 
-**Links:**
+## Achievements
 
-- [Kaggle GTSRB Dataset](https://www.kaggle.com/datasets/meowmeowmeowmeowmeow/gtsrb-german-traffic-sign)  
-- [Navoshta’s Traffic Sign Classification](https://navoshta.com/traffic-signs-classification/)  
-- [Victor Zhou’s Intro to CNNs](https://victorzhou.com/blog/intro-to-cnns-part-1/)
-
----
+- **High Validation Accuracy**: Achieved **98.75%** accuracy on the validation set
+- **Optimized Training Time**: Complete model training in just **01:21:04** (1 hour, 21 minutes)
+- **Effective L2 Regularization**: Successfully implemented L2 regularization across all layers
+- **Model Optimization**: Refined dropout rates (10%-50%) for optimal performance
+- **Comprehensive Documentation**: Detailed analysis and visualization of training results
+- **Automated Pipeline**: End-to-end workflow from raw data processing to prediction
 
 ## Features
 
@@ -25,18 +26,33 @@ This project implements a **Convolutional Neural Network (CNN)** to classify tra
 
 ## Project Structure
 
-- `convert_data.py`: Converts raw GTSRB `.ppm` images to pickle files (`train.p`, `test.p`).
-- `data_loader.py`: Loads pickled data and traffic sign names from `signnames.csv`.
-- `data_processor.py`: Preprocesses data (grayscale, equalization, normalization) and augments it (flipping, balancing).
-- `model_builder.py`: Defines the CNN architecture with TensorFlow.
-- `main.py`: Main script to run training or prediction modes with optional dataset rebuilding.
-- `predictor.py`: Predicts traffic sign classes for custom images and visualizes results.
-- `data_visualizer.py`: Visualizes dataset samples, class distribution, preprocessing, augmentation, and t-SNE.
-- `trainer.py`: Manages model training with callbacks for checkpointing, logging, and early stopping.
-- `requirements.txt`: Lists Python dependencies.
-- `data/`: Contains raw images, `signnames.csv`, and pickle files (`train.p`, `test.p`, etc.).
-- `models/`: Stores trained model weights and training logs.
-- `utils/`: Includes `AugmentedSignsBatchIterator.py` for data augmentation.
+```
+german_traffic_sign/
+├── data/
+│   ├── train.p
+│   ├── test.p
+│   ├── train_balanced.p
+│   ├── train_extended.p
+│   ├── signnames.csv
+│   └── custom/
+├── models/
+├── utils/
+├── config.json
+├── main.py
+├── data_loader.py
+├── data_processor.py
+├── model_builder.py
+├── trainer.py
+└── predictor.py
+```
+
+- `config.json`: Configuration settings for the model and training process
+- `main.py`: Main script to run training or prediction modes with optional dataset rebuilding
+- `data_loader.py`: Loads pickled data and traffic sign names from `signnames.csv`
+- `data_processor.py`: Preprocesses data (grayscale, equalization, normalization) and augments it (flipping, balancing)
+- `model_builder.py`: Defines the CNN architecture with TensorFlow
+- `trainer.py`: Manages model training with callbacks for checkpointing, logging, and early stopping
+- `predictor.py`: Predicts traffic sign classes for custom images and visualizes results
 
 ---
 
@@ -109,6 +125,14 @@ python main.py --mode train --rebuild-datasets
 - The following chart shows the model's learning curves with different l2 regularisation values 
 ![L2 Comparison Results](l2_comparison_results.png)
 *Left: Model loss on logarithmic scale. Right: Model accuracy for training and validation sets.*
+
+### Latest Performance Metrics
+
+```
+Valid loss: 0.21012770, accuracy = 98.75%
+Total time: 01:21:04
+Timestamp: 2025/05/10 21:48:32
+```
 
 ### Predicting on New Images
 
@@ -227,8 +251,7 @@ This project is licensed under the **MIT License**.
 
 ## Acknowledgments
 
-- **GTSRB Dataset** for training and testing data.
-- **TensorFlow, scikit-learn, and scikit-image** libraries.
+- **[Kaggle GTSRB Dataset](https://www.kaggle.com/datasets/meowmeowmeowmeowmeow/gtsrb-german-traffic-sign)** for training and testing data.
 - Inspiration from [Navoshta](https://navoshta.com/traffic-signs-classification/) and [Victor Zhou](https://victorzhou.com/blog/intro-to-cnns-part-1/).
 
 ---
