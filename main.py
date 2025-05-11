@@ -63,7 +63,7 @@ def main():
     # Check if datasets should be rebuilt
     if args.rebuild_datasets:
         print_debug("Rebuild datasets flag set, removing existing processed datasets...")
-        for dataset_file in ['data/train_balanced.p', 'data/train_extended.p', 'data/train_flipped.p']:
+        for dataset_file in ['data/train_balanced.p', 'data/train_extended.p']:
             if os.path.exists(dataset_file):
                 os.remove(dataset_file)
                 print_debug(f"Removed existing dataset file: {dataset_file}")
@@ -96,7 +96,7 @@ def main():
         return
     
     # Preprocess data with progress indicators
-    total_steps = 5  # Total preprocessing steps
+    total_steps = 4  # Total preprocessing steps
     current_step = 0
     
     # Step 1: Preprocess training data
@@ -116,40 +116,7 @@ def main():
                                                 preprocess_dataset, X_test, y_test)
     progress_bar(1, 1, prefix="Preprocessing testing data", suffix="Complete")
     
-    # Step 3: Create flipped dataset
-    current_step += 1
-    print_debug(f"Preprocessing step {current_step}/{total_steps}: Creating flipped dataset")
-    if os.path.exists('data/train_flipped.p'):
-        print_debug("Flipped dataset already exists, loading...")
-        X_train_flipped, y_train_flipped = load_pickled_data('data/train_flipped.p', ['features', 'labels'])
-        print_debug(f"Loaded flipped dataset with {len(X_train_flipped)} samples")
-    else:
-        print_debug("Creating flipped dataset with domain-specific augmentations...")
-        X_train_flipped, y_train_flipped = process_data_with_progress(
-            "flip-based dataset extension",
-            flip_extend, X_train, y_train
-        )
-        
-        print_debug(f"Saving flipped dataset with {len(X_train_flipped)} samples...")
-        with open('data/train_flipped.p', 'wb') as f:
-            pickle.dump({'features': X_train_flipped, 'labels': y_train_flipped}, f)
-        
-        # Verify class distribution in flipped dataset
-        print_debug("Verifying class distribution in flipped dataset...")
-        # Check if labels are one-hot encoded or single integers
-        if len(y_train_flipped.shape) > 1 and y_train_flipped.shape[1] > 1:
-            # One-hot encoded format
-            flipped_class_counts = np.array([np.sum(np.argmax(y_train_flipped, axis=1) == c) for c in range(43)])
-        else:
-            # Single label format
-            flipped_class_counts = np.array([np.sum(y_train_flipped == c) for c in range(43)])
-        
-        print_debug(f"Flipped dataset stats:")
-        print_debug(f"  - Total samples: {len(X_train_flipped)}")
-        print_debug(f"  - Min samples per class: {np.min(flipped_class_counts)} (Class {np.argmin(flipped_class_counts)})")
-        print_debug(f"  - Max samples per class: {np.max(flipped_class_counts)} (Class {np.argmax(flipped_class_counts)})")
-    
-    # Step 4: Create balanced dataset
+    # Step 3: Create balanced dataset
     current_step += 1
     print_debug(f"Preprocessing step {current_step}/{total_steps}: Creating balanced dataset")
     if os.path.exists('data/train_balanced.p'):
@@ -233,7 +200,7 @@ def main():
         if classes_within_tolerance < 39:  # If less than 90% of classes are within tolerance
             print_debug("WARNING: Dataset balance may not be optimal. Consider adjusting balancing parameters.")
     
-    # Step 5: Create extended dataset
+    # Step 4: Create extended dataset
     current_step += 1
     print_debug(f"Preprocessing step {current_step}/{total_steps}: Creating extended dataset")
     if os.path.exists('data/train_extended.p'):
@@ -277,34 +244,21 @@ def main():
     if args.mode == 'train':
         print_debug("=== Starting Model Training ===")
         
-        # Load flipped + balanced dataset combination for training
-        print_debug("Loading flipped and balanced datasets for improved training...")
-        X_train_flipped, y_train_flipped = load_pickled_data('data/train_flipped.p', ['features', 'labels'])
+        # Load balanced dataset for training
+        print_debug("Loading balanced dataset for training...")
         X_train_balanced, y_train_balanced = load_pickled_data('data/train_balanced.p', ['features', 'labels'])
-        
-        # Combine the datasets
-        print_debug(f"Combining datasets: flipped ({len(X_train_flipped)} samples) + balanced ({len(X_train_balanced)} samples)...")
-        X_combined = np.concatenate((X_train_flipped, X_train_balanced), axis=0)
-        y_combined = np.concatenate((y_train_flipped, y_train_balanced), axis=0)
-        
-        # Shuffle the combined dataset
-        print_debug("Shuffling combined dataset...")
-        from sklearn.utils import shuffle
-        X_combined, y_combined = shuffle(X_combined, y_combined)
-        
-        print_debug(f"Final combined training dataset: {X_combined.shape[0]} samples")
         
         # Data is already in [0, 1] range and float32 format from the preprocessing
         print_debug("Data is already in [0, 1] range and float32 format, skipping scaling...")
         
         # Ensure data has the correct shape with channel dimension
-        if len(X_combined.shape) == 3:
-            print_debug("Adding channel dimension to combined data...")
-            X_combined = X_combined.reshape(X_combined.shape + (1,))
+        if len(X_train_balanced.shape) == 3:
+            print_debug("Adding channel dimension to data...")
+            X_train_balanced = X_train_balanced.reshape(X_train_balanced.shape + (1,))
         
         # Split into train and validation
-        print_debug("Splitting combined data into training and validation sets (75%/25%)...")
-        X_train, X_valid, y_train, y_valid = train_test_split(X_combined, y_combined, test_size=0.25)
+        print_debug("Splitting data into training and validation sets (75%/25%)...")
+        X_train, X_valid, y_train, y_valid = train_test_split(X_train_balanced, y_train_balanced, test_size=0.25)
         print_debug(f"Training set: {X_train.shape[0]} samples")
         print_debug(f"Validation set: {X_valid.shape[0]} samples")
         
